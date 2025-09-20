@@ -1,0 +1,119 @@
+# Few-shot & contrastive-ready configuration derived from TSPN/HUST.
+# Toggle the optional sections below to enable new functionality.
+
+environment:
+  WANDB_MODE: "disabled"
+  VBENCH_HOME: "/home/xuanli/work/PHM-Vibench"
+  PYTHONPATH: "/home/xuanli/miniforge/envs/phmbench"
+  PHMBench: "/home/xuanli/work/PHM-Vibench"
+
+  project: "tspn_fewshot_demo"
+  seed: 42
+  output_dir: "results/tspn_fewshot_demo"
+  notes: "Base TSPN run with optional few-shot/contrastive toggles disabled."
+  iterations: 5
+
+data:
+  # data_dir: "/mnt/crucial/LQ/PHMbench_data"
+  data_dir: "/mnt/e/dataset/PHMbench-raw_data"
+  metadata_file: "metadata_6_1.xlsx"
+  batch_size: 64
+  num_workers: 8
+  train_ratio: 0.8
+  normalization: 'standardization'
+  window_size: 4096
+  stride: 5
+  truncate_lenth: 100
+  dtype: float32
+  num_window: 64
+
+model:
+  name: "TSPN"
+  type: "X_model"
+  device: cuda
+  signal_processing_configs:
+    layer1: ['LNO','WF','HT','I']
+    layer2: ['LNO','WF','HT','I']
+    layer3: ['LNO','WF','HT','I']
+    layer4: ['LNO','WF','HT','I']
+  feature_extractor_configs: ['Mean', 'Std', 'Var', 'Entropy','Max', 'Min', 'AbsMean', 'Kurtosis', 'RMS', 'CrestFactor','Skewness', 'ClearanceFactor', 'ShapeFactor']
+  skip_connection: true
+  num_classes: 9
+  in_dim : 4096
+  out_dim : 4096
+  in_channels : 3
+  out_channels : 4
+  scale : 4
+
+  f_c_mu: 0
+  f_c_sigma: 0.1
+  f_b_mu: 0
+  f_b_sigma: 0.1
+
+  # Optional contrastive-learning head. Leave disabled to keep baseline parity.
+  contrastive:
+    enabled: false
+    projection_hidden: 512
+    projection_dim: 128
+    temperature: 0.1
+    loss_weight: 0.0  # set >0 when enabling contrastive training
+    mode: "supervised"
+
+# Task configuration inherits DG classification defaults.
+task:
+  name: "classification"
+  type: 'DG'
+  target_domain_id: [10]
+  source_domain_id: [0,1,2,3,4]
+  loss: "CE"
+  metrics: ["acc"]
+  target_system_id: [19]
+
+  optimizer: "adam"
+  regularization: {'flag': True, 'method': {'l1': 0.0001}}
+
+  batch_size: 64
+  num_workers: 8
+  pin_memory: true
+  shuffle: true
+  log_interval: 10
+  epochs: 100
+  lr: 0.001
+  weight_decay: 0.0001
+  early_stopping: true
+  es_patience: 5
+  scheduler: true
+  scheduler_type: "step"
+  step_size: 3
+  gamma: 0.5
+
+  # Optional few-shot episodic sampling controls.
+  few_shot:
+    enabled: false
+    sampler: "hierarchical"
+    systems_per_episode: 1
+    domains_per_episode: 2
+    classes_per_domain: 3
+    support_per_class: 5
+    query_per_class: 15
+    preserve_labels: true
+    episodes_per_epoch: 200
+
+  # Optional explainability exporter controls.
+  explainability:
+    enabled: false
+    output_subdir: "explainability"
+    device: "auto"  # "auto" falls back to CPU when GPU-only ops unavailable
+
+trainer:
+  name: "Default_trainer"
+  wandb: true
+  pruning: false
+  num_epochs: 10
+  gpus: 1
+  early_stopping: true
+  patience: 5
+  device: 'cuda'
+
+  logging:
+    contrastive_metrics: false

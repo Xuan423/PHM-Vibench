@@ -1,4 +1,5 @@
 from .Sampler import HierarchicalFewShotSampler, Same_system_Sampler
+from .FewShotDGSampler import FewShotDGSampler
 
 def _get_gfs_sampler(args_task, args_data, dataset, mode):
     if mode == 'train':
@@ -41,8 +42,16 @@ def _get_cddg_sampler(args_data, dataset, mode):
         raise ValueError(f"Unknown mode for CDDG sampler: {mode}")
     return sampler
 
-def _get_dg_sampler(args_data, dataset, mode):
-    if mode == 'train':
+def _get_dg_sampler(args_task, args_data, dataset, mode):
+    few_shot_cfg = getattr(args_task, 'few_shot', None)
+    if few_shot_cfg and getattr(few_shot_cfg, 'enabled', False):
+        sampler = FewShotDGSampler(
+            dataset=dataset,
+            few_shot_cfg=few_shot_cfg,
+            mode=mode,
+            default_seed=getattr(args_task, 'seed', getattr(args_data, 'seed', 0)),
+        )
+    elif mode == 'train':
         sampler = Same_system_Sampler(
             dataset, 
             batch_size=args_data.batch_size,
@@ -105,7 +114,7 @@ def Get_sampler(args_task, args_data, dataset, mode='train'):
     elif args_task.type == 'CDDG':
         sampler = _get_cddg_sampler(args_data, dataset, mode)
     elif args_task.type == 'DG':
-        sampler = _get_dg_sampler(args_data, dataset, mode)
+        sampler = _get_dg_sampler(args_task, args_data, dataset, mode)
     elif args_task.type == 'multi_task':
         # Multi-task learning uses standard batch sampling
         sampler = _get_pretrain_sampler(args_data, dataset, mode)  # Reuse pretrain sampler

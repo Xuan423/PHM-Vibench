@@ -196,3 +196,6 @@ plot/
 test/
 metrics_reports/
 cache/
+
+# spec workflow
+.spec-workflow/

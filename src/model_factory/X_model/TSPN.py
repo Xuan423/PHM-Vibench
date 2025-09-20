@@ -43,6 +43,9 @@ class Model(nn.Module):
         self.layer_num = len(self.signal_processing_modules)
         self.args = args
 
+        self.num_classes = self._resolve_num_classes(args)
+        self.args.num_classes = self.num_classes
+
         self.init_signal_processing_layers()
         self.init_feature_extractor_layers()
         self.init_classifier()
@@ -96,9 +99,24 @@ class Model(nn.Module):
         self.channel_for_classifier = self.channel_for_feature * len_feature
 
 
+    def _resolve_num_classes(self, args):
+        num_classes = getattr(args, 'num_classes', None)
+        if isinstance(num_classes, dict):
+            if not num_classes:
+                raise ValueError('num_classes mapping is empty; cannot initialise classifier')
+            return int(max(num_classes.values()))
+        if isinstance(num_classes, (list, tuple)):
+            if not num_classes:
+                raise ValueError('num_classes sequence is empty; cannot initialise classifier')
+            return int(num_classes[0])
+        if num_classes is None:
+            raise ValueError('Model configuration missing num_classes')
+        return int(num_classes)
+
+
     def init_classifier(self):
         print('# build classifier')
-        self.clf = Classifier(self.channel_for_classifier, self.args.num_classes).to(self.args.device)
+        self.clf = Classifier(self.channel_for_classifier, self.num_classes).to(self.args.device)
 
     def forward(self, x, data_id = None,task_id = None):
         """Compute logits for a batch.

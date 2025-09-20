@@ -39,8 +39,12 @@ def task_factory(
     args_trainer: Namespace,
     args_environment: Namespace,
     metadata: Any,
+    args_evaluation: Any = None,
 ) -> Optional[pl.LightningModule]:
-    """Instantiate a task module using configuration namespaces."""
+    """Instantiate a task module using configuration namespaces.
+
+    The optional args_evaluation parameter is accepted for API compatibility;
+    it is currently unused by the factory."""
     key = f"{args_task.type}.{args_task.name}"
     try:
         task_cls = TASK_REGISTRY.get(key)
