@@ -51,6 +51,14 @@ class task(Default_task):
         self.log_components = bool(_get(task_cfg, "log_components", False))
         self.mode = _get(task_cfg, "mode", _get(model_cfg, "mode", "supervised"))
 
+        noise_default = _get(model_cfg, "gaussian_noise_std", 0.1)
+        noise_std = _get(task_cfg, "gaussian_noise_std", noise_default)
+        try:
+            noise_std = float(noise_std)
+        except (TypeError, ValueError):
+            noise_std = 0.1
+        self.gaussian_noise_std = max(noise_std, 0.0)
+
         self._explainability_cfg = getattr(self.args_task, "explainability", None)
         self._explainability_enabled = bool(
             getattr(self._explainability_cfg, "enabled", False)
@@ -141,45 +149,40 @@ class task(Default_task):
     ) -> Optional[torch.Tensor]:
         if self.contrastive_weight <= 0:
             return None
-        if projections.size(0) < 2:
+        # ``labels`` and ``file_ids`` are kept for API compatibility but unused in this
+        # noise-based contrastive formulation.
+        # Pair each embedding with a Gaussian-perturbed replica to avoid missing positives.
+        batch_size = projections.size(0)
+        if batch_size == 0:
             return torch.tensor(0.0, device=projections.device)
-
-        domains = self._resolve_domains_tensor(file_ids, device=projections.device)
 
         feats = projections
         if self.normalize_embeddings:
             feats = F.normalize(feats, dim=-1)
 
-        # Similarity matrix scaled by temperature
-        logits = torch.matmul(feats, feats.T) / self.temperature
-        logits = logits - torch.max(logits, dim=1, keepdim=True).values  # numerical stability
+        noise = torch.randn_like(feats) * self.gaussian_noise_std
+        positives = feats + noise
+        if self.normalize_embeddings:
+            positives = F.normalize(positives, dim=-1)
+
+        combined = torch.cat([feats, positives], dim=0)
+        logits = torch.matmul(combined, combined.T) / self.temperature
+        logits = logits - torch.max(logits, dim=1, keepdim=True).values
         diag_mask = torch.eye(logits.size(0), device=logits.device, dtype=torch.bool)
         logits = logits.masked_fill(diag_mask, float("-inf"))
 
-        labels = labels.view(-1)
-        label_mask = labels.unsqueeze(0) == labels.unsqueeze(1)
-
-        if self.mode == "domain-aware":
-            domain_mask = domains.unsqueeze(0) != domains.unsqueeze(1)
-            positive_mask = label_mask & domain_mask
-        else:
-            positive_mask = label_mask
-
-        positive_mask = positive_mask & ~diag_mask
-        positive_counts = positive_mask.sum(dim=1)
-        valid = positive_counts > 0
-        if not torch.any(valid):
-            return torch.tensor(0.0, device=projections.device)
-
         exp_logits = torch.exp(logits)
-        exp_logits = exp_logits * (~diag_mask).float()
         log_prob = logits - torch.log(exp_logits.sum(dim=1, keepdim=True) + 1e-12)
 
-        mean_log_prob_pos = (log_prob * positive_mask.float()).sum(dim=1) / torch.clamp(
-            positive_counts.float(), min=1.0
-        )
+        positive_mask = torch.zeros_like(logits, dtype=torch.bool)
+        identity = torch.eye(batch_size, device=logits.device, dtype=torch.bool)
+        positive_mask[:batch_size, batch_size:] = identity
+        positive_mask[batch_size:, :batch_size] = identity
 
-        loss = -mean_log_prob_pos[valid].mean()
+        positive_counts = torch.clamp(positive_mask.sum(dim=1), min=1)
+        mean_log_prob_pos = (log_prob * positive_mask.float()).sum(dim=1) / positive_counts.float()
+
+        loss = -mean_log_prob_pos.mean()
         return loss
 
     def _resolve_domains_tensor(self, file_ids: list, device: torch.device) -> torch.Tensor:
