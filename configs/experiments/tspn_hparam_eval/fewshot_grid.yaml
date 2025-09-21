@@ -1,0 +1,41 @@
+# Hyperparameter grid for episodic few-shot sampling analysis.
+
+base_config: base_import.yaml
+group: "fewshot"
+description: "Study how episodic sampler settings influence TSPN generalisation."
+
+fixed:
+  model.contrastive.enabled: false
+  task.few_shot.enabled: true
+  task.few_shot.sampler: "hierarchical"
+  task.few_shot.systems_per_episode: 1
+  task.few_shot.episodes_per_epoch: 20
+  task.contrastive.loss_weight: 0.0
+  task.contrastive.temperature: 0.1
+  trainer.logging.contrastive_metrics: false
+
+parameters:
+  domains_per_episode:
+    values: [2, 3, 4]
+    apply:
+      - task.few_shot.domains_per_episode
+  classes_per_domain:
+    values: [2, 3, 4]
+    apply:
+      - task.few_shot.classes_per_domain
+  support_per_class:
+    values: [3, 5, 8]
+    apply:
+      - task.few_shot.support_per_class
+  query_per_class:
+    values: [10, 15, 20]
+    apply:
+      - task.few_shot.query_per_class
+
+extra_runs:
+  - name: "fewshot_disabled"
+    description: "Baseline supervised batches without episodic sampling."
+    overrides:
+      task.few_shot.enabled: false
+      model.contrastive.enabled: false
+      trainer.logging.contrastive_metrics: false

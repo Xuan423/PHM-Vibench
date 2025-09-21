@@ -1,0 +1,55 @@
+# Hyperparameter combinations for the contrastive-learning sweep.
+#
+# Each entry under `parameters` lists candidate values and the config paths to
+# apply. The orchestration utility performs a Cartesian product across the
+# parameter values, merging them with the defaults from base_import.yaml.
+
+base_config: base_import.yaml
+group: "contrastive"
+description: "Toggle contrastive head and explore temperature, weight, and projection dimensions."
+
+fixed:
+  model.contrastive.enabled: true
+  task.few_shot.enabled: true
+  task.few_shot.sampler: "hierarchical"
+  task.few_shot.systems_per_episode: 1
+  task.few_shot.domains_per_episode: 3
+  task.few_shot.classes_per_domain: 3
+  task.few_shot.support_per_class: 5
+  task.few_shot.query_per_class: 10
+  task.few_shot.episodes_per_epoch: 10
+  trainer.logging.contrastive_metrics: true
+  task.contrastive.mode: "supervised"
+  task.contrastive.normalize_embeddings: true
+
+parameters:
+  contrastive_loss_weight:
+    values: [0.02, 0.05, 0.1, 0.2]
+    apply:
+      - model.contrastive.loss_weight
+      - task.contrastive.loss_weight
+  contrastive_temp:
+    values: [0.05, 0.1, 0.2]
+    apply:
+      - model.contrastive.temperature
+      - task.contrastive.temperature
+  projection_hidden:
+    values: [128, 256, 512]
+    apply:
+      - model.contrastive.projection_hidden
+  projection_dim:
+    values: [32, 64, 128]
+    apply:
+      - model.contrastive.projection_dim
+
+extra_runs:
+  - name: "contrastive_disabled"
+    description: "Baseline run without contrastive learning for comparison."
+    overrides:
+      model.contrastive.enabled: false
+      model.contrastive.loss_weight: 0.0
+      model.contrastive.temperature: 0.1
+      task.contrastive.loss_weight: 0.0
+      task.contrastive.temperature: 0.1
+      task.few_shot.enabled: false
+      trainer.logging.contrastive_metrics: false

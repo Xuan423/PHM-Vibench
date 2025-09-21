@@ -1,0 +1,49 @@
+# Hyperparameter grid targeting optimizer-level sensitivity analyses.
+
+base_config: base_import.yaml
+group: "optimizer"
+description: "Evaluate learning rate, weight decay, and scheduler variants."
+
+fixed:
+  model.contrastive.enabled: false
+  task.few_shot.enabled: false
+  trainer.logging.contrastive_metrics: false
+  task.optimizer: "adam"
+
+parameters:
+  lr:
+    values: [0.0005, 0.001, 0.002]
+    apply:
+      - task.lr
+  weight_decay:
+    values: [0.0, 0.0001, 0.0005]
+    apply:
+      - task.weight_decay
+  scheduler_variant:
+    options:
+      - name: "none"
+        overrides:
+          task.scheduler: null
+      - name: "step"
+        overrides:
+          task.scheduler:
+            name: "step"
+            options:
+              step_size: 5
+              gamma: 0.5
+      - name: "cosine"
+        overrides:
+          task.scheduler:
+            name: "cosine"
+            options:
+              T_max: 80
+              eta_min: 1.0e-5
+      - name: "reduce_on_plateau"
+        overrides:
+          task.scheduler:
+            name: "reduceonplateau"
+            options:
+              patience: 5
+              factor: 0.5
+              mode: "min"
+          task.monitor: "val_total_loss"

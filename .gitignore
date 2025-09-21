@@ -168,7 +168,8 @@ configs/LQ_paper
 main_LQ.py
 dev/
 plot/
-script/
+script/*
+!script/hparam_eval/
 wandb/
 LQ1/
 plot/save
@@ -193,7 +194,9 @@ out.csv
 dev/project/valve.ipynb
 dev/ross_demo/fault.ipynb
 plot/
-test/
+test/*
+!test/script/
+!test/script/**
 metrics_reports/
 cache/
 

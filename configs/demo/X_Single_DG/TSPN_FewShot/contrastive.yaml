@@ -37,7 +37,7 @@ task:
     sampler: "hierarchical"
     systems_per_episode: 1
     domains_per_episode: 3
-    classes_per_domain: 5
+    classes_per_domain: 3
     support_per_class: 5
     query_per_class: 10
     preserve_labels: true
