@@ -145,6 +145,7 @@ def pipeline(args):
         
         # 构建训练器
         print("[INFO] 构建训练器...")
+        args_trainer.model = args_model
         trainer = build_trainer(
             args_environment,
             args_trainer,

@@ -4,11 +4,14 @@ Pytest configuration and fixtures for PHM-Vibench Model Factory tests.
 This module provides shared fixtures and configuration for all tests.
 """
 
+import os
+os.environ.setdefault("PYTORCH_NO_CUDA", "1")
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
+
 import pytest
 import torch
 import numpy as np
 import warnings
-import os
 import sys
 
 # Add src to path for imports

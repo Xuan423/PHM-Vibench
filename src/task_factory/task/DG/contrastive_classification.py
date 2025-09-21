@@ -175,7 +175,13 @@ class task(Default_task):
         exp_logits = exp_logits * (~diag_mask).float()
         log_prob = logits - torch.log(exp_logits.sum(dim=1, keepdim=True) + 1e-12)
 
-        mean_log_prob_pos = (log_prob * positive_mask.float()).sum(dim=1) / torch.clamp(
+        # Avoid propagating NaNs from (-inf) * 0 when masking non-positive pairs.
+        masked_log_prob = torch.where(
+            positive_mask,
+            log_prob,
+            torch.zeros_like(log_prob),
+        )
+        mean_log_prob_pos = masked_log_prob.sum(dim=1) / torch.clamp(
             positive_counts.float(), min=1.0
         )
 

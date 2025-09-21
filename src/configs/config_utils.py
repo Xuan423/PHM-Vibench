@@ -17,7 +17,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, Tuple, Union, Optional
+from typing import Any, Dict, Tuple, Union, Optional, Set
 
 import yaml
 
@@ -191,17 +191,49 @@ def _to_config_wrapper(source: Union[str, Path, Dict, SimpleNamespace]) -> Confi
 
 
 
-def _load_yaml_file(file_path: Union[str, Path]) -> Dict[str, Any]:
-    """从YAML文件加载配置字典"""
-    
+def _load_yaml_file(file_path: Union[str, Path], *, _visited: Optional[Set[Path]] = None) -> Dict[str, Any]:
+    """Load YAML configuration with support for ``__include__`` directives."""
+    file_path = Path(file_path).resolve()
+
+    if _visited is None:
+        _visited = set()
+    if file_path in _visited:
+        chain = " -> ".join(str(p) for p in list(_visited) + [file_path])
+        raise RuntimeError(f"Circular include detected: {chain}")
+    _visited.add(file_path)
+
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
-            config_dict = yaml.safe_load(f)
+            config_dict = yaml.safe_load(f) or {}
     except UnicodeDecodeError:
         with open(file_path, 'r', encoding='gb18030', errors='ignore') as f:
-            config_dict = yaml.safe_load(f)
-    
-    return config_dict or {}
+            config_dict = yaml.safe_load(f) or {}
+
+    if not isinstance(config_dict, dict):
+        raise TypeError(f"Configuration root in {file_path} must be a mapping")
+
+    includes = config_dict.pop('__include__', [])
+    if isinstance(includes, str):
+        includes = [includes]
+    merged: Dict[str, Any] = {}
+    for include in includes:
+        include_path = (file_path.parent / include).resolve()
+        include_dict = _load_yaml_file(include_path, _visited=_visited)
+        merged = _deep_merge_dicts(merged, include_dict)
+
+    merged = _deep_merge_dicts(merged, config_dict)
+    _visited.remove(file_path)
+    return merged
+
+def _deep_merge_dicts(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    """Recursively merge two dictionaries without mutating inputs."""
+    result = dict(base)
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = _deep_merge_dicts(result[key], value)
+        else:
+            result[key] = value
+    return result
 
 def _validate_config_wrapper(config: ConfigWrapper) -> None:
     """验证ConfigWrapper的必需字段

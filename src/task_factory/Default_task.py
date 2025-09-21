@@ -193,12 +193,16 @@ class Default_task(pl.LightningModule):
         for k, v in metrics.items():
             # 过滤掉非当前阶段或 batch_size 的指标
             if k.startswith(stage) and "batch_size" not in k:
+                # 仅保留 loss / acc 类指标供外部日志记录器绘图
+                if not any(keyword in k for keyword in ("loss", "acc")):
+                    continue
+
                 log_dict[k] = v
                 # 选择要在进度条上显示的指标
                 if any(prog_key in k for prog_key in ['loss', 'acc', 'f1']): # 简化进度条显示
                     # 只显示不带数据集名称的总指标或第一个数据集的指标
                     if f"{stage}_loss" == k or f"{stage}_acc_" in k or f"{stage}_f1_" in k:
-                         prog_bar_metrics[k.replace(f"_{stage}", "")] = v # 简化显示名称
+                        prog_bar_metrics[k.replace(f"_{stage}", "")] = v # 简化显示名称
 
 
         self.log_dict(
@@ -279,5 +283,4 @@ class Default_task(pl.LightningModule):
 
         # 对于非 ReduceLROnPlateau 的调度器，返回列表形式
         return [optimizer], [{'scheduler': scheduler, 'interval': 'epoch', 'frequency': 1}]
-
 

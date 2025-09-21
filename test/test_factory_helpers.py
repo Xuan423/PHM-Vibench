@@ -38,6 +38,11 @@ def test_resolve_trainer_module_default():
     assert resolve_trainer_module(args) == 'src.trainer_factory.Default_trainer'
 
 
+def test_resolve_trainer_module_from_name():
+    args = SimpleNamespace(name='contrastive_trainer')
+    assert resolve_trainer_module(args) == 'src.trainer_factory.contrastive_trainer'
+
+
 def test_build_data_registered():
     @register_data_factory("dummy")
     class DummyFactory:

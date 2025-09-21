@@ -169,6 +169,7 @@ class MultiTaskPretrainFinetunePipeline:
             )
 
             # Build trainer using factory pattern
+            args_trainer.model = args_model
             trainer = build_trainer(
                 args_environment=args_environment,
                 args_trainer=args_trainer,
@@ -347,6 +348,7 @@ class MultiTaskPretrainFinetunePipeline:
             )
 
             # Build trainer using factory pattern
+            args_trainer.model = args_model
             trainer = build_trainer(
                 args_environment=args_environment,
                 args_trainer=args_trainer,
@@ -429,6 +431,7 @@ class MultiTaskPretrainFinetunePipeline:
             )
 
             # Build trainer using factory pattern
+            args_trainer.model = args_model
             trainer = build_trainer(
                 args_environment=args_environment,
                 args_trainer=args_trainer,

@@ -1,127 +1,59 @@
-# Enables the contrastive TSPN wrapper and few-shot sampler for domain-invariant training.
+# Contrastive few-shot domain generalisation configuration built on shared defaults.
+
+__include__:
+  - shared.yaml
 
 environment:
-  WANDB_MODE: "disabled"
-  VBENCH_HOME: "/home/xuanli/work/PHM-Vibench"
-  PYTHONPATH: "/home/xuanli/miniforge/envs/phmbench"
-  PHMBench: "/home/xuanli/work/PHM-Vibench"
-
   project: "tspn_contrastive_demo"
-  seed: 42
   output_dir: "results/tspn_contrastive_demo"
   notes: "Contrastive few-shot DG run for TSPN."
   iterations: 1
+  swanlab: true
 
 data:
-  data_dir: "/mnt/e/dataset/PHMbench-raw_data"
-  metadata_file: "metadata_6_1.xlsx"
-  batch_size: 32
-  num_workers: 8
-  train_ratio: 0.8
-  normalization: 'standardization'
-  window_size: 4096
-  stride: 5
-  truncate_lenth: 100
-  dtype: float32
-  num_window: 64
+  batch_size: &bs 32
 
 model:
   name: "TSPNContrastive"
-  type: "X_model"
-  device: cuda
-  signal_processing_configs:
-    layer1: ['LNO','WF','HT','I']
-    layer2: ['LNO','WF','HT','I']
-    layer3: ['LNO','WF','HT','I']
-    layer4: ['LNO','WF','HT','I']
-  feature_extractor_configs: ['Mean', 'Std', 'Var', 'Entropy','Max', 'Min', 'AbsMean', 'Kurtosis', 'RMS', 'CrestFactor','Skewness', 'ClearanceFactor', 'ShapeFactor']
-  skip_connection: true
-  num_classes: 9
-  in_dim : 4096
-  out_dim : 4096
-  in_channels : 3
-  out_channels : 4
-  scale : 4
-
-  f_c_mu: 0
-  f_c_sigma: 0.1
-  f_b_mu: 0
-  f_b_sigma: 0.1
-
   contrastive:
     enabled: true
-    projection_hidden: 256 #512
-    projection_dim: 64 #128
-    temperature: 0.1
-    loss_weight: 0.2
-    mode: "domain-aware"
-
-  # Domain-aware mining strategy can be tuned here when implemented.
+    projection_hidden: 256
+    projection_dim: 64
+    temperature: &contrastive_temp 0.1
+    loss_weight: &contrastive_loss_weight 0.05
+    mode: "supervised"
   mining:
     strategy: "domain"
 
 task:
   name: "contrastive_classification"
-  type: 'DG'
-  target_domain_id: [10]
-  source_domain_id: [0,1,2,3,4]
-  loss: "CE"
-  metrics: ["acc"]
-  target_system_id: [19]
-
-  optimizer: "adam"
-  regularization: {'flag': True, 'method': {'l1': 0.0001}}
-
-  batch_size: 32
-  num_workers: 8
-  pin_memory: true
-  shuffle: true
-  log_interval: 10
-  epochs: 80
-  lr: 0.0005
-  weight_decay: 0.0001
-  early_stopping: true
-  es_patience: 8
-  scheduler: true
-  scheduler_type: "step"
+  batch_size: *bs
+  epochs: &num_epoch 100
+  lr: 0.001
+  es_patience: &es_patience 50
   step_size: 5
-  gamma: 0.5
-
   few_shot:
     enabled: true
     sampler: "hierarchical"
     systems_per_episode: 1
     domains_per_episode: 3
-    classes_per_domain: 3
+    classes_per_domain: 5
     support_per_class: 5
     query_per_class: 10
     preserve_labels: true
-    episodes_per_epoch: 10 # 200
+    episodes_per_epoch: 10
     warn_on_shortfall: true
-
-  explainability:
-    enabled: false
-    output_subdir: "explainability"
-    device: "auto"
-
   contrastive:
-    temperature: 0.1
-    loss_weight: 0.3
+    temperature: *contrastive_temp
+    loss_weight: *contrastive_loss_weight
     normalize_embeddings: true
 
 trainer:
-  name: "Default_trainer"
-  wandb: true
-  pruning: false
-  num_epochs: 50
-  gpus: 1
-  early_stopping: true
-  patience: 8
-  device: 'cuda'
-
+  name: "contrastive_trainer"
+  num_epochs: *num_epoch
+  patience: *es_patience
   logging:
     contrastive_metrics: true
-
   callbacks:
-    checkpoint_monitor: "val_loss"
+    checkpoint_monitor: "val_total_loss"
     checkpoint_mode: "min"

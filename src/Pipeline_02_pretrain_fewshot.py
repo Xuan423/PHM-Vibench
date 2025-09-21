@@ -63,6 +63,7 @@ def run_stage(config_path, ckpt_path=None,iteration=0, args=None):
         args_environment=args_environment,
         metadata=data_factory.get_metadata()
     )
+    args_trainer.model = args_model
     trainer = build_trainer(args_environment, args_trainer, args_data, path)
     trainer.fit(task, data_factory.get_dataloader('train'), data_factory.get_dataloader('val'))
     task = load_best_model_checkpoint(task, trainer)
