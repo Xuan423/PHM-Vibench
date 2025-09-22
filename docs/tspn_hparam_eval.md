@@ -1,6 +1,6 @@
 # TSPN Hyperparameter Evaluation Guide
 
-本指南说明如何使用新的超参数评估工具对 TSPN 进行对比学习、小样本和优化器配置的系统实验。
+本指南说明如何使用新的超参数评估工具对 TSPN 进行对比学习、小样本和优化器配置的系统实验。所有网格默认基于 `TSPNContrastive` + `contrastive_classification` + `contrastive_trainer` 的组合，以便统一处理投影层与小样本采样；仅基线配置会回退到原始 `TSPN`/`Default_task`/`Default_trainer` 组合。
 
 ## 1. 环境准备
 

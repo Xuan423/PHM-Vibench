@@ -14,7 +14,7 @@ environment:
   iterations: 1
 
 model:
-  name: "TSPN"
+  name: "TSPNContrastive"
   contrastive:
     enabled: false
     projection_hidden: 256
@@ -24,6 +24,7 @@ model:
     mode: "supervised"
 
 task:
+  name: "contrastive_classification"
   few_shot:
     enabled: false
     episodes_per_epoch: 50
@@ -39,6 +40,7 @@ task:
       gamma: 0.5
 
 trainer:
+  name: "contrastive_trainer"
   logging:
     contrastive_metrics: false
   callbacks:

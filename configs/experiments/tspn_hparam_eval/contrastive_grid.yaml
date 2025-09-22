@@ -9,6 +9,7 @@ group: "contrastive"
 description: "Toggle contrastive head and explore temperature, weight, and projection dimensions."
 
 fixed:
+  model.name: "TSPNContrastive"
   model.contrastive.enabled: true
   task.few_shot.enabled: true
   task.few_shot.sampler: "hierarchical"
@@ -19,6 +20,8 @@ fixed:
   task.few_shot.query_per_class: 10
   task.few_shot.episodes_per_epoch: 10
   trainer.logging.contrastive_metrics: true
+  trainer.name: "contrastive_trainer"
+  task.name: "contrastive_classification"
   task.contrastive.mode: "supervised"
   task.contrastive.normalize_embeddings: true
 

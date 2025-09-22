@@ -9,12 +9,14 @@ environment:
   notes: "Legacy TSPN run without contrastive or episodic components."
 
 model:
+  name: "TSPN"
   contrastive:
     enabled: false
     loss_weight: 0.0
     temperature: 0.1
 
 task:
+  name: "classification"
   few_shot:
     enabled: false
   contrastive:
@@ -27,5 +29,6 @@ task:
   epochs: 100
 
 trainer:
+  name: "Default_trainer"
   logging:
     contrastive_metrics: false

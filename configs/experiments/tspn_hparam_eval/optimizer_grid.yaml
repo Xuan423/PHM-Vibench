@@ -5,10 +5,13 @@ group: "optimizer"
 description: "Evaluate learning rate, weight decay, and scheduler variants."
 
 fixed:
+  model.name: "TSPNContrastive"
   model.contrastive.enabled: false
   task.few_shot.enabled: false
   trainer.logging.contrastive_metrics: false
   task.optimizer: "adam"
+  trainer.name: "contrastive_trainer"
+  task.name: "contrastive_classification"
 
 parameters:
   lr:

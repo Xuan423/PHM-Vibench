@@ -5,6 +5,7 @@ group: "fewshot"
 description: "Study how episodic sampler settings influence TSPN generalisation."
 
 fixed:
+  model.name: "TSPNContrastive"
   model.contrastive.enabled: false
   task.few_shot.enabled: true
   task.few_shot.sampler: "hierarchical"
@@ -13,6 +14,8 @@ fixed:
   task.contrastive.loss_weight: 0.0
   task.contrastive.temperature: 0.1
   trainer.logging.contrastive_metrics: false
+  trainer.name: "contrastive_trainer"
+  task.name: "contrastive_classification"
 
 parameters:
   domains_per_episode:
