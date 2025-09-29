@@ -53,7 +53,7 @@ task:
   name: "classification"
   type: 'DG'
   target_domain_id: [10]
-  source_domain_id: [0,1,2,3,4]
+  source_domain_id: [0,2,4,6,8] # [0,1,2,3,4]
   loss: "CE"
   metrics: ["acc"]
   target_system_id: [19]
@@ -66,7 +66,7 @@ task:
   log_interval: 10
   epochs: 100
   lr: 0.001
-  weight_decay: 0.0001
+  weight_decay: 0.0005
   early_stopping: true
   es_patience: 5
   scheduler: true

@@ -52,9 +52,9 @@ model:
     enabled: true
     projection_hidden: 512
     projection_dim: 128
-    temperature: 0.07
-    loss_weight: 0.6
-    mode: "domain-aware"
+    temperature: 0.2
+    loss_weight: 0.2
+    mode: "supervised"
 
   mining:
     strategy: "domain"
@@ -77,11 +77,11 @@ task:
   pin_memory: true
   shuffle: true
   log_interval: 10
-  epochs: 80
-  lr: 0.0005
-  weight_decay: 0.0001
+  epochs: 100
+  lr: 0.002
+  weight_decay: 0.0005
   early_stopping: true
-  es_patience: 8
+  es_patience: 50
   scheduler: true
   scheduler_type: "step"
   step_size: 5
@@ -91,12 +91,12 @@ task:
     enabled: true
     sampler: "hierarchical"
     systems_per_episode: 1
-    domains_per_episode: 3
-    classes_per_domain: 3
-    support_per_class: 5
+    domains_per_episode: 4
+    classes_per_domain: 4
+    support_per_class: 3
     query_per_class: 10
     preserve_labels: true
-    episodes_per_epoch: 50 # 200
+    episodes_per_epoch: 10 # 200
     warn_on_shortfall: true
 
   explainability:
@@ -112,8 +112,8 @@ task:
       samples: 32
 
   contrastive:
-    temperature: 0.07
-    loss_weight: 0.6
+    temperature: 0.2
+    loss_weight: 0.2
     normalize_embeddings: true
     log_components: true
 
@@ -121,10 +121,10 @@ trainer:
   name: "Default_trainer"
   wandb: true
   pruning: false
-  num_epochs: 5
+  num_epochs: 100
   gpus: 1
   early_stopping: true
-  patience: 8
+  patience: 50
   device: 'cuda'
 
   logging:
