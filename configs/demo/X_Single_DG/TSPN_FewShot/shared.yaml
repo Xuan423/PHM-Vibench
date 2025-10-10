@@ -9,7 +9,7 @@ environment:
 
 data:
   data_dir: "/mnt/e/dataset/PHMbench-raw_data"
-  metadata_file: "metadata_6_1.xlsx"
+  metadata_file: "metadata_9_29.xlsx"
   batch_size: 64
   num_workers: 8
   train_ratio: 0.8
@@ -83,6 +83,7 @@ task:
     query_per_class: 15
     preserve_labels: true
     episodes_per_epoch: 200
+    format: "flat"
   explainability:
     enabled: false
     output_subdir: "explainability"

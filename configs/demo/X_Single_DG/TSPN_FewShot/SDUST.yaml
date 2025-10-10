@@ -1,12 +1,12 @@
-# Contrastive few-shot domain generalisation configuration built on shared defaults.
+# JUST scenario: enable few-shot TSPN DG towards system 18 / domain 9.
 
 __include__:
-  - shared.yaml
+  - base.yaml
 
 environment:
-  project: "tspn_contrastive_demo"
-  output_dir: "results/tspn_contrastive_demo"
-  notes: "Contrastive few-shot DG run for TSPN."
+  project: "tspn_fewshot_just"
+  output_dir: "results/tspn_fewshot_just"
+  notes: "Few-shot TSPN DG run targeting JUST system 18 domain 9."
   iterations: 1
   swanlab: false
 
@@ -15,6 +15,7 @@ data:
 
 model:
   name: "TSPNContrastive"
+  in_channels : 6
   contrastive:
     enabled: true
     projection_hidden: 512
@@ -27,6 +28,9 @@ model:
 
 task:
   name: "contrastive_classification"
+  target_system_id: [21]
+  target_domain_id: [33]
+  source_domain_id: [0,4,9,13,17,21]
   batch_size: *bs
   epochs: &num_epoch 100
   lr: 0.002
@@ -37,28 +41,16 @@ task:
     sampler: "hierarchical"
     systems_per_episode: 1
     domains_per_episode: 4
-    classes_per_domain: 4
-    support_per_class: 3
+    classes_per_domain: 6
+    support_per_class: 5
     query_per_class: 10
     preserve_labels: true
     episodes_per_epoch: 10
     warn_on_shortfall: true
-    format: "episode"
   contrastive:
     temperature: *contrastive_temp
     loss_weight: *contrastive_loss_weight
     normalize_embeddings: true
-  explainability:
-    enabled: true
-    output_subdir: "explainability"
-    device: "auto"
-    summary:
-      top_k_features: 10
-      save_embeddings: true
-    attribution:
-      method: "grad_cam"
-      smooth: true
-      samples: 32
 
 trainer:
   name: "contrastive_trainer"

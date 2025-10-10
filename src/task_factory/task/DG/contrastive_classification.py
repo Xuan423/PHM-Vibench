@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence
 from pathlib import Path
+import warnings
 
 import torch
 import torch.nn.functional as F
 
 from ...Default_task import Default_task
+from ....data_factory.batch import EpisodeBatch, EpisodeLabelView
 from ....utils.explainability import export_tspn_explainability
 
 
@@ -66,7 +68,12 @@ class task(Default_task):
         task_id = batch.get("task_id")
         return self.network(x, file_id, task_id, return_embeddings=True)
 
-    def _shared_step(self, batch: Dict[str, Any], stage: str, task_id=False):
+    def _shared_step(self, batch: Any, stage: str, task_id=False):
+        if isinstance(batch, EpisodeBatch):
+            return self._shared_step_episode(batch, stage)
+        return self._shared_step_standard(batch, stage)
+
+    def _shared_step_standard(self, batch: Dict[str, Any], stage: str) -> Dict[str, torch.Tensor]:
         batch.setdefault("task_id", "contrastive_classification")
 
         file_ids_tensor = batch["file_id"]
@@ -129,6 +136,134 @@ class task(Default_task):
             self._cache_for_explainability(stage, projections.detach(), file_ids, y)
 
         return step_metrics
+
+    def _shared_step_episode(self, batch: EpisodeBatch, stage: str) -> Dict[str, torch.Tensor]:
+        if batch.query_x.size(0) == 0:
+            warnings.warn(
+                "Episode batch contains no query samples; falling back to flat batch pipeline.",
+                RuntimeWarning,
+            )
+            return self._shared_step_standard(batch.flat_batch, stage)
+
+        device = self.device
+        query_x = batch.query_x.to(device)
+        query_y = batch.query_y.to(device)
+
+        query_file_ids = self._normalise_file_ids(batch.query_file_ids)
+        first_file_id = query_file_ids[0]
+        meta_row = self.metadata[first_file_id]
+        data_name = meta_row.get("Name", "unknown")
+
+        support_embeddings = None
+        support_projection = None
+        prototype_tensor = None
+
+        if batch.support_x.size(0) > 0:
+            support_x = batch.support_x.to(device)
+            with torch.no_grad():
+                if hasattr(self.network, "encode"):
+                    support_embeddings = self.network.encode(support_x)
+                else:
+                    support_embeddings = self.network(support_x)["embeddings"]
+                if hasattr(self.network, "project"):
+                    support_projection = self.network.project(support_embeddings)
+                else:
+                    support_projection = support_embeddings
+            prototype_tensor = self._compute_prototypes(support_embeddings, batch.label_views)
+
+        query_outputs = self.network(
+            query_x,
+            data_id=query_file_ids,
+            task_id="contrastive_classification",
+            return_embeddings=True,
+        )
+        logits = query_outputs["logits"]
+        query_embeddings = query_outputs["embeddings"]
+        query_projection = query_outputs["projection"]
+
+        ce_loss = self._compute_loss(logits, query_y)
+        y_argmax = torch.argmax(logits, dim=1) if logits.ndim > 1 else logits
+
+        step_metrics: Dict[str, torch.Tensor] = {
+            f"{stage}_loss": ce_loss,
+            f"{stage}_{data_name}_loss": ce_loss,
+        }
+        step_metrics.update(self._compute_metrics(y_argmax, query_y, data_name, stage))
+
+        reg_dict = self._compute_regularization()
+        for reg_type, reg_loss_val in reg_dict.items():
+            if reg_type != "total":
+                step_metrics[f"{stage}_{reg_type}_reg_loss"] = reg_loss_val
+
+        total_loss = ce_loss + reg_dict.get("total", torch.tensor(0.0, device=ce_loss.device))
+
+        projections_for_loss = query_projection
+        labels_for_loss = query_y
+        file_ids_for_loss: Sequence[Any] = query_file_ids
+
+        if support_projection is not None and batch.support_y.numel() > 0:
+            support_proj_detached = support_projection.detach()
+            projections_for_loss = torch.cat([support_proj_detached, query_projection], dim=0)
+            labels_for_loss = torch.cat([batch.support_y.to(device), query_y], dim=0)
+            file_ids_for_loss = list(self._normalise_file_ids(batch.support_file_ids)) + list(query_file_ids)
+
+        contrastive_loss = self._compute_contrastive_loss(
+            projections=projections_for_loss,
+            labels=labels_for_loss,
+            file_ids=file_ids_for_loss,
+        )
+
+        if contrastive_loss is not None:
+            step_metrics[f"{stage}_contrastive_loss"] = contrastive_loss
+            weighted = contrastive_loss * self.contrastive_weight
+            step_metrics[f"{stage}_contrastive_weighted_loss"] = weighted
+            total_loss = total_loss + weighted
+            if self.log_components:
+                device = logits.device
+                step_metrics[f"{stage}_contrastive_temperature"] = torch.as_tensor(
+                    self.temperature, device=device
+                )
+                step_metrics[f"{stage}_contrastive_weight"] = torch.as_tensor(
+                    self.contrastive_weight, device=device
+                )
+
+        if prototype_tensor is not None and self.log_components:
+            step_metrics[f"{stage}_prototype_norm_mean"] = prototype_tensor.norm(dim=-1).mean()
+
+        step_metrics[f"{stage}_total_loss"] = total_loss
+        step_metrics[f"{stage}_batch_size"] = torch.tensor(query_y.size(0), device=total_loss.device)
+
+        if self._explainability_enabled and stage in ("val", "test"):
+            self._cache_for_explainability(stage, query_projection.detach(), query_file_ids, query_y)
+
+        return step_metrics
+
+    @staticmethod
+    def _normalise_file_ids(file_ids: Sequence[Any]) -> list:
+        normalised = []
+        for fid in file_ids:
+            if isinstance(fid, torch.Tensor):
+                normalised.append(fid.item())
+            else:
+                normalised.append(fid)
+        return normalised
+
+    @staticmethod
+    def _compute_prototypes(
+        support_embeddings: Optional[torch.Tensor],
+        label_views: Sequence[EpisodeLabelView],
+    ) -> Optional[torch.Tensor]:
+        if support_embeddings is None or support_embeddings.size(0) == 0:
+            return None
+        prototypes = []
+        for view in label_views:
+            if view.support_count == 0:
+                continue
+            proto = support_embeddings[view.support_slice].mean(dim=0)
+            prototypes.append(proto)
+        if not prototypes:
+            return None
+        return torch.stack(prototypes, dim=0)
 
     # ------------------------------------------------------------------
     # Contrastive utilities

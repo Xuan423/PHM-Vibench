@@ -4,12 +4,32 @@ from __future__ import annotations
 
 import math
 import warnings
-from collections import defaultdict
-from typing import Dict, Iterator, List, Tuple
+from collections import defaultdict, deque
+from dataclasses import dataclass
+from typing import Deque, Dict, Iterator, List, Optional, Tuple
 
 from torch.utils.data import Sampler
 
 from ..dataset_task.Dataset_cluster import IdIncludedDataset
+
+
+@dataclass
+class EpisodeLabelLayout:
+    system_id: str
+    domain_id: str
+    label_id: str
+    support_start: int
+    support_count: int
+    query_start: int
+    query_count: int
+
+
+@dataclass
+class EpisodeLayout:
+    size: int
+    requested_support: int
+    requested_query: int
+    labels: List[EpisodeLabelLayout]
 
 
 class FewShotDGSampler(Sampler[List[int]]):
@@ -109,6 +129,7 @@ class FewShotDGSampler(Sampler[List[int]]):
         # Determine global fallback counts for support/query if needed.
         self._effective_support, self._effective_query = self._compute_effective_shots(requested_total)
         self._warned_labels: set[str] = set()
+        self._layout_queue: Deque[EpisodeLayout] = deque()
 
     def _compute_effective_shots(self, requested_total: int) -> Tuple[int, int]:
         min_count = math.inf
@@ -155,6 +176,12 @@ class FewShotDGSampler(Sampler[List[int]]):
     def __len__(self) -> int:
         return self.episodes_per_epoch
 
+    def pop_layout(self) -> Optional[EpisodeLayout]:
+        """Return the next episode layout emitted during iteration."""
+        if not self._layout_queue:
+            return None
+        return self._layout_queue.popleft()
+
     def __iter__(self) -> Iterator[List[int]]:
         import random
 
@@ -165,6 +192,7 @@ class FewShotDGSampler(Sampler[List[int]]):
             rng.shuffle(systems)
             chosen_systems = systems[: min(self.systems_per_episode, len(systems))]
             episode_indices: List[int] = []
+            episode_layout_labels: List[EpisodeLabelLayout] = []
 
             if len(chosen_systems) < self.systems_per_episode and self.warn_on_shortfall:
                 warnings.warn(
@@ -206,11 +234,41 @@ class FewShotDGSampler(Sampler[List[int]]):
                         indices = self._indices_by_label.get((system_id, domain_id, label_id), [])
                         if not indices:
                             continue
-                        episode_indices.extend(
-                            self._draw_indices_for_label(indices, label_id, rng)
+                        support_indices, query_indices = self._draw_indices_for_label(
+                            indices,
+                            label_id,
+                            rng,
+                        )
+                        if not support_indices and not query_indices:
+                            continue
+
+                        support_start = len(episode_indices)
+                        if support_indices:
+                            episode_indices.extend(support_indices)
+                        query_start = len(episode_indices)
+                        if query_indices:
+                            episode_indices.extend(query_indices)
+
+                        episode_layout_labels.append(
+                            EpisodeLabelLayout(
+                                system_id=system_id,
+                                domain_id=domain_id,
+                                label_id=label_id,
+                                support_start=support_start,
+                                support_count=len(support_indices),
+                                query_start=query_start,
+                                query_count=len(query_indices),
+                            )
                         )
 
             if episode_indices:
+                layout = EpisodeLayout(
+                    size=len(episode_indices),
+                    requested_support=self._effective_support,
+                    requested_query=self._effective_query,
+                    labels=episode_layout_labels,
+                )
+                self._layout_queue.append(layout)
                 yield episode_indices
 
     def _draw_indices_for_label(
@@ -218,7 +276,7 @@ class FewShotDGSampler(Sampler[List[int]]):
         candidates: List[int],
         label_id: str,
         rng,
-    ) -> List[int]:
+    ) -> Tuple[List[int], List[int]]:
         available = len(candidates)
         support = self._effective_support
         query = self._effective_query
@@ -227,10 +285,12 @@ class FewShotDGSampler(Sampler[List[int]]):
         if available >= required:
             # Sample without replacement for deterministic reproducibility.
             chosen = rng.sample(candidates, required)
-            return chosen
+            support_indices = chosen[:support]
+            query_indices = chosen[support:]
+            return support_indices, query_indices
 
         if available == 0:
-            return []
+            return [], []
 
         if self.warn_on_shortfall and label_id not in self._warned_labels:
             warnings.warn(
@@ -238,6 +298,11 @@ class FewShotDGSampler(Sampler[List[int]]):
                 RuntimeWarning,
             )
             self._warned_labels.add(label_id)
-        # Return all unique indices and allow downstream batching logic to handle the
-        # imbalance (remaining slots stay unfilled for this label).
-        return list(candidates)
+        pool = list(candidates)
+        rng.shuffle(pool)
+        support_taken = min(support, len(pool))
+        support_indices = pool[:support_taken]
+        remaining = pool[support_taken:]
+        query_taken = min(query, len(remaining))
+        query_indices = remaining[:query_taken]
+        return support_indices, query_indices

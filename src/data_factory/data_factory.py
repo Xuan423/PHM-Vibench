@@ -16,6 +16,7 @@ import concurrent.futures
 from tqdm import tqdm  # 用于显示进度条
 from torch.utils.data import Dataset
 from .samplers.Sampler import GroupedIdBatchSampler, BalancedIdSampler
+from .batch import EpisodeCollate
 from .data_utils import smart_read_csv, MetadataAccessor, download_data
 from .samplers.Get_sampler import Get_sampler
 from .ID.Id_searcher import search_ids_for_task, search_target_dataset_metadata
@@ -328,6 +329,20 @@ class data_factory:
             raise ValueError(f"Unknown mode for get_sampler: {mode}")
         return Get_sampler(self.args_task, self.args_data, dataset, mode)
 
+    def _resolve_collate(self, sampler):
+        few_shot_cfg = getattr(self.args_task, 'few_shot', None)
+        if few_shot_cfg is None or not getattr(few_shot_cfg, 'enabled', False):
+            return None
+
+        format_value = getattr(few_shot_cfg, 'format', '')
+        if not isinstance(format_value, str) or format_value.lower() != 'episode':
+            return None
+
+        if sampler is None or not hasattr(sampler, 'pop_layout'):
+            return None
+
+        return EpisodeCollate(sampler, metadata=self.metadata)
+
     def _init_dataloader(self):
         train_sampler = self.get_sampler(mode='train')
         val_sampler = self.get_sampler(mode='val')
@@ -337,30 +352,35 @@ class data_factory:
         persistent_workers = False
         # 限制num_workers数量以减少内存使用
         num_workers = min(self.args_data.num_workers, 4)
-        self.train_loader = DataLoader(self.train_dataset,
-                                #   batch_size=self.args_data.batch_size,
-                                         batch_sampler = train_sampler,
-                                        #  shuffle=True,
-                                         num_workers=num_workers,
-                                         pin_memory=False,     # 禁用pin_memory减少内存压力
-                                         persistent_workers=persistent_workers,)
-                                        #  collate_fn=debug_collate_fn)
-        self.val_loader = DataLoader(self.val_dataset,
-                                #  batch_size=self.args_data.batch_size,
-                                        batch_sampler = val_sampler,
-                                        # shuffle=False,
-                                        num_workers=num_workers,
-                                        pin_memory=False,     # 禁用pin_memory减少内存压力
-                                        persistent_workers=persistent_workers,)
-        self.test_loader = DataLoader(self.test_dataset,
-                                #  batch_size=self.args_data.batch_size,
-                                        batch_sampler = test_sampler,
-                                        # shuffle=False,
-                                        num_workers=num_workers,
-                                        pin_memory=False,     # 禁用pin_memory减少内存压力
-                                        persistent_workers=persistent_workers,)
 
+        train_collate = self._resolve_collate(train_sampler)
+        val_collate = self._resolve_collate(val_sampler)
+        test_collate = self._resolve_collate(test_sampler)
 
+        self.train_loader = DataLoader(
+            self.train_dataset,
+            batch_sampler=train_sampler,
+            num_workers=num_workers,
+            pin_memory=False,
+            persistent_workers=persistent_workers,
+            collate_fn=train_collate,
+        )
+        self.val_loader = DataLoader(
+            self.val_dataset,
+            batch_sampler=val_sampler,
+            num_workers=num_workers,
+            pin_memory=False,
+            persistent_workers=persistent_workers,
+            collate_fn=val_collate,
+        )
+        self.test_loader = DataLoader(
+            self.test_dataset,
+            batch_sampler=test_sampler,
+            num_workers=num_workers,
+            pin_memory=False,
+            persistent_workers=persistent_workers,
+            collate_fn=test_collate,
+        )
 
         return self.train_loader, self.val_loader, self.test_loader
 
