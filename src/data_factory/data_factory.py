@@ -338,10 +338,11 @@ class data_factory:
         if not isinstance(format_value, str) or format_value.lower() != 'episode':
             return None
 
-        if sampler is None or not hasattr(sampler, 'pop_layout'):
+        layout_queue = getattr(sampler, 'layout_queue', None) if sampler is not None else None
+        if layout_queue is None:
             return None
 
-        return EpisodeCollate(sampler, metadata=self.metadata)
+        return EpisodeCollate(layout_queue=layout_queue, metadata=self.metadata)
 
     def _init_dataloader(self):
         train_sampler = self.get_sampler(mode='train')

@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import warnings
-import weakref
 from dataclasses import dataclass, field
+from queue import Empty
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 import torch
@@ -46,19 +46,20 @@ class EpisodeBatch:
 class EpisodeCollate:
     """Collate function that materialises support/query tensors per episode."""
 
-    def __init__(self, sampler, *, metadata: Optional[Any] = None) -> None:
-        self._sampler_ref = weakref.ref(sampler) if sampler is not None else lambda: None
+    def __init__(self, *, layout_queue: Optional[Any] = None, metadata: Optional[Any] = None) -> None:
+        self._layout_queue = layout_queue
         self.metadata = metadata
 
     # ------------------------------------------------------------------
     def __call__(self, samples: Sequence[Dict[str, Any]]) -> Any:
-        sampler = self._sampler_ref() if isinstance(self._sampler_ref, weakref.ReferenceType) else None
         layout: Optional[EpisodeLayout] = None
-        if sampler is not None and hasattr(sampler, "pop_layout"):
-            layout = sampler.pop_layout()
+        if self._layout_queue is not None:
+            try:
+                layout = self._layout_queue.get_nowait()
+            except Empty:
+                layout = None
         if layout is None:
             return default_collate(samples)
-        print(f"Collating episode with layout: {layout}")
         if layout.size != len(samples):
             warnings.warn(
                 "Episode layout size mismatch; falling back to default collate.",

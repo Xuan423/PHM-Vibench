@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import math
+import multiprocessing as mp
 import warnings
-from collections import defaultdict, deque
+from collections import defaultdict
 from dataclasses import dataclass
-from typing import Deque, Dict, Iterator, List, Optional, Tuple
-
+from queue import Empty
+from typing import Dict, Iterator, List, Optional, Tuple
 from torch.utils.data import Sampler
 
 from ..dataset_task.Dataset_cluster import IdIncludedDataset
@@ -129,7 +130,9 @@ class FewShotDGSampler(Sampler[List[int]]):
         # Determine global fallback counts for support/query if needed.
         self._effective_support, self._effective_query = self._compute_effective_shots(requested_total)
         self._warned_labels: set[str] = set()
-        self._layout_queue: Deque[EpisodeLayout] = deque()
+        start_method = mp.get_start_method(allow_none=True) or "spawn"
+        ctx = mp.get_context(start_method)
+        self._layout_queue = ctx.Queue()
 
     def _compute_effective_shots(self, requested_total: int) -> Tuple[int, int]:
         min_count = math.inf
@@ -178,9 +181,10 @@ class FewShotDGSampler(Sampler[List[int]]):
 
     def pop_layout(self) -> Optional[EpisodeLayout]:
         """Return the next episode layout emitted during iteration."""
-        if not self._layout_queue:
+        try:
+            return self._layout_queue.get_nowait()
+        except Empty:
             return None
-        return self._layout_queue.popleft()
 
     def __iter__(self) -> Iterator[List[int]]:
         import random
@@ -268,8 +272,13 @@ class FewShotDGSampler(Sampler[List[int]]):
                     requested_query=self._effective_query,
                     labels=episode_layout_labels,
                 )
-                self._layout_queue.append(layout)
+                self._layout_queue.put(layout)
                 yield episode_indices
+
+    @property
+    def layout_queue(self):
+        """Expose the multiprocessing queue carrying episode layouts."""
+        return self._layout_queue
 
     def _draw_indices_for_label(
         self,
