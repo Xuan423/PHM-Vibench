@@ -12,22 +12,22 @@ model:
   num_classes: 10
   in_channels : 6
   contrastive:
-    loss_weight: &contrastive_loss_weight 0.2
+    loss_weight: &contrastive_loss_weight 0.3
 
 task:
   target_system_id: [21]
-  target_domain_id: [37] #37
-  source_domain_id: [0,4,9,13,17,21]
+  target_domain_id: [40] #37
+  source_domain_id: [3,7,12,16,20,24] # [0,4,9,13,17,21]   [1,5,10,14,18,22]  [2,6,11,15,19,23]
   few_shot:
     enabled: true
     sampler: "hierarchical"
     systems_per_episode: 1
     domains_per_episode: 4
-    classes_per_domain: 6
+    classes_per_domain: 8
     support_per_class: 3
-    query_per_class: 10
+    query_per_class: 6
     preserve_labels: true
-    episodes_per_epoch: 30
+    episodes_per_epoch: 10
     warn_on_shortfall: true
     format: "episode"
 
