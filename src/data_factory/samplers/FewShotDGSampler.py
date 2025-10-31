@@ -133,6 +133,10 @@ class FewShotDGSampler(Sampler[List[int]]):
         start_method = mp.get_start_method(allow_none=True) or "spawn"
         ctx = mp.get_context(start_method)
         self._layout_queue = ctx.Queue()
+        # Avoid the interpreter blocking on Queue feeder threads during shutdown.
+        cancel_join = getattr(self._layout_queue, "cancel_join_thread", None)
+        if callable(cancel_join):
+            cancel_join()
 
     def _compute_effective_shots(self, requested_total: int) -> Tuple[int, int]:
         min_count = math.inf
