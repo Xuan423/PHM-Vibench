@@ -1,4 +1,4 @@
-"""CLI entrypoint for orchestrating TSPN hyperparameter sweeps."""
+"""CLI entrypoint for orchestrating the TSPN contrastive hyperparameter sweep."""
 
 from __future__ import annotations
 
@@ -6,13 +6,11 @@ import argparse
 import itertools
 import math
 import shutil
-import textwrap
 import time
-from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 import pandas as pd
 import yaml
@@ -21,7 +19,6 @@ from .utils import (
     LaunchResult,
     build_override,
     export_json,
-    export_yaml,
     launch_experiment,
     load_metrics,
 )
@@ -46,7 +43,6 @@ class RunSpec:
     """Fully materialised run specification."""
 
     name: str
-    group: str
     base_config: Path
     overrides: Dict[str, Any]
     hyperparams: Dict[str, Any]
@@ -68,13 +64,7 @@ class RunResult:
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="TSPN hyperparameter sweep orchestrator")
-    parser.add_argument(
-        "--sweep",
-        choices=["contrastive", "fewshot", "optimizer", "baseline", "all"],
-        default="all",
-        help="Sweep group to execute.",
-    )
+    parser = argparse.ArgumentParser(description="TSPN contrastive sweep orchestrator")
     parser.add_argument(
         "--config-root",
         type=Path,
@@ -86,6 +76,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         type=Path,
         default=OUTPUT_ROOT_DEFAULT,
         help="Root directory for aggregated outputs.",
+    )
+    parser.add_argument(
+        "--grid",
+        type=Path,
+        default=None,
+        help="Optional explicit path to the sweep grid YAML. Defaults to config-root/contrastive_grid.yaml.",
     )
     parser.add_argument(
         "--max-parallel",
@@ -143,26 +139,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     output_root: Path = args.output_root
     output_root.mkdir(parents=True, exist_ok=True)
 
-    groups = [args.sweep] if args.sweep != "all" else ["contrastive", "fewshot", "optimizer", "baseline"]
-
-    run_specs: List[RunSpec] = []
-    for group in groups:
-        run_specs.extend(
-            build_run_specs_for_group(
-                group=group,
-                config_root=config_root,
-                output_root=output_root,
-                pipeline=args.pipeline,
-                global_notes=args.notes,
-                limit=args.limit,
-            )
-        )
+    grid_path = args.grid if args.grid else (config_root / "contrastive_grid.yaml")
+    run_specs = build_run_specs(
+        grid_path=grid_path,
+        output_root=output_root,
+        pipeline=args.pipeline,
+        global_notes=args.notes,
+        limit=args.limit,
+    )
 
     if not run_specs:
-        print("[WARN] No run specifications generated; aborting.")
+        print(f"[WARN] No run specifications generated from grid {grid_path}; aborting.")
         return 0
 
-    print(f"[INFO] Generated {len(run_specs)} run specifications across groups: {', '.join(groups)}")
+    print(f"[INFO] Generated {len(run_specs)} run specifications from {grid_path}")
 
     results = execute_runs(
         run_specs,
@@ -193,38 +183,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     return 0
 
 
-def build_run_specs_for_group(
+def build_run_specs(
     *,
-    group: str,
-    config_root: Path,
+    grid_path: Path,
     output_root: Path,
     pipeline: Optional[str],
     global_notes: str,
     limit: int,
 ) -> List[RunSpec]:
-    if group == "baseline":
-        baseline_path = config_root / "baseline_original.yaml"
-        if not baseline_path.exists():
-            raise FileNotFoundError(f"Missing baseline config: {baseline_path}")
-        run_name = "baseline_original"
-        output_dir = output_root / "baseline" / run_name
-        overrides = {
-            "environment.project": f"baseline_{run_name}",
-            "environment.output_dir": str(output_dir),
-            "environment.notes": collapse_notes("Baseline reference run.", global_notes),
-        }
-        spec = RunSpec(
-            name=run_name,
-            group="baseline",
-            base_config=baseline_path,
-            overrides=overrides,
-            hyperparams={},
-            output_dir=output_dir,
-            pipeline=pipeline,
-        )
-        return [spec]
-
-    grid_path = config_root / f"{group}_grid.yaml"
     if not grid_path.exists():
         raise FileNotFoundError(f"Missing sweep configuration: {grid_path}")
 
@@ -237,7 +203,6 @@ def build_run_specs_for_group(
 
     fixed = grid_def.get("fixed", {})
     parameters = grid_def.get("parameters", {})
-    extra_runs = grid_def.get("extra_runs", [])
 
     parameter_order = list(parameters.keys())
     option_sets: List[List[ParameterOption]] = []
@@ -255,7 +220,7 @@ def build_run_specs_for_group(
     for combo_idx, combo in enumerate(combos):
         hyperparams: Dict[str, Any] = {}
         overrides: Dict[str, Any] = dict(fixed)
-        name_parts = [group]
+        name_parts = ["contrastive"]
         for option in combo:
             hyperparams[option.key] = option.value
             overrides.update(option.overrides)
@@ -265,20 +230,19 @@ def build_run_specs_for_group(
             run_name = f"{run_name}__{combo_idx}"
         seen_names.add(run_name)
 
-        output_dir = output_root / group / run_name
+        output_dir = output_root / "contrastive" / run_name
         overrides.update(
             {
-                "environment.project": f"{group}_{run_name}",
+                "environment.project": f"contrastive_{run_name}",
                 "environment.output_dir": str(output_dir),
                 "environment.notes": collapse_notes(
-                    describe_hyperparams(group, hyperparams),
+                    describe_hyperparams(hyperparams),
                     global_notes,
                 ),
             }
         )
         spec = RunSpec(
             name=run_name,
-            group=group,
             base_config=base_config,
             overrides=overrides,
             hyperparams=hyperparams,
@@ -288,37 +252,6 @@ def build_run_specs_for_group(
         run_specs.append(spec)
         if limit and len(run_specs) >= limit:
             break
-
-    for extra in extra_runs:
-        name = extra.get("name")
-        if not name:
-            raise ValueError(f"extra_runs entry in {grid_path} missing name")
-        overrides = dict(fixed)
-        overrides.update(extra.get("overrides", {}))
-        hyperparams = extra.get("hyperparams", {})
-        output_dir = output_root / group / name
-        overrides.update(
-            {
-                "environment.project": f"{group}_{name}",
-                "environment.output_dir": str(output_dir),
-                "environment.notes": collapse_notes(
-                    extra.get("description", "Extra run"),
-                    global_notes,
-                ),
-            }
-        )
-        spec = RunSpec(
-            name=name,
-            group=group,
-            base_config=base_config,
-            overrides=overrides,
-            hyperparams=hyperparams,
-            output_dir=output_dir,
-            pipeline=pipeline,
-        )
-        if limit and len(run_specs) >= limit:
-            break
-        run_specs.append(spec)
 
     return run_specs
 
@@ -367,11 +300,11 @@ def collapse_notes(*notes: str) -> str:
     return " | ".join(parts)
 
 
-def describe_hyperparams(group: str, params: Mapping[str, Any]) -> str:
+def describe_hyperparams(params: Mapping[str, Any]) -> str:
     if not params:
-        return f"{group} sweep default configuration"
+        return "contrastive sweep default configuration"
     items = [f"{key}={value}" for key, value in params.items()]
-    return f"{group}: " + ", ".join(items)
+    return " | ".join(items)
 
 
 def execute_runs(
@@ -417,7 +350,6 @@ def execute_runs(
         export_json(
             {
                 "run_name": spec.name,
-                "group": spec.group,
                 "hyperparams": spec.hyperparams,
                 "overrides": spec.overrides,
                 "config_path": str(cache_path),
@@ -491,59 +423,44 @@ def summarise_results(results: Sequence[RunResult], output_root: Path) -> None:
         return
 
     rows: List[Dict[str, Any]] = []
-    baseline_summary: Dict[str, float] = {}
+    all_param_keys: set[str] = set()
     for result in results:
         summary = result.metrics.get("summary", {}) if result.metrics else {}
-        if result.spec.group == "baseline" and result.status == "success":
-            baseline_summary = summary
-        for metric, value in summary.items():
-            rows.append(
-                {
-                    "group": result.spec.group,
-                    "run_name": result.spec.name,
-                    "metric": metric,
-                    "value": value,
-                    "status": result.status,
-                }
-            )
-        if not summary:
-            rows.append(
-                {
-                    "group": result.spec.group,
-                    "run_name": result.spec.name,
-                    "metric": "n/a",
-                    "value": float("nan"),
-                    "status": result.status,
-                }
-            )
+        row: Dict[str, Any] = {
+            "run_name": result.spec.name,
+            "status": result.status,
+            "runtime_sec": result.launch.runtime,
+            "test_acc": summary.get("test_acc", math.nan),
+        }
+        for key, value in result.spec.hyperparams.items():
+            row[key] = value
+            all_param_keys.add(key)
+        rows.append(row)
 
     df = pd.DataFrame(rows)
-    if not df.empty and baseline_summary:
-        df["baseline_delta"] = df.apply(
-            lambda row: row["value"] - baseline_summary.get(row["metric"], math.nan)
-            if isinstance(row["value"], (int, float)) and not math.isnan(row["value"])
-            else math.nan,
-            axis=1,
-        )
-    summary_csv = output_root / "summary_metrics.csv"
+    param_columns = sorted(all_param_keys)
+    preferred_cols = ["run_name", "status"] + param_columns + ["test_acc", "runtime_sec"]
+    existing_cols = [col for col in preferred_cols if col in df.columns]
+    if existing_cols:
+        df = df[existing_cols]
+
+    summary_dir = output_root
+    summary_dir.mkdir(parents=True, exist_ok=True)
+
+    summary_csv = summary_dir / "contrastive_sweep_summary.csv"
     df.to_csv(summary_csv, index=False)
 
-    summary_md = output_root / "summary_report.md"
+    summary_md = summary_dir / "contrastive_sweep_summary.md"
     with summary_md.open("w", encoding="utf-8") as fp:
-        fp.write("# TSPN Hyperparameter Evaluation Summary\n\n")
-        if baseline_summary:
-            fp.write("## Baseline Reference\n\n")
-            for metric, value in baseline_summary.items():
-                fp.write(f"- **{metric}**: {value}\n")
-            fp.write("\n")
-        for group, group_df in df.groupby("group"):
-            fp.write(f"## {group.capitalize()} sweep\n\n")
+        fp.write("# TSPN Contrastive Sweep Summary\n\n")
+        if df.empty:
+            fp.write("_No runs executed._\n")
+        else:
             try:
-                table_repr = group_df.to_markdown(index=False)
+                fp.write(df.to_markdown(index=False))
             except ImportError:
-                table_repr = group_df.to_string(index=False)
-            fp.write(table_repr)
-            fp.write("\n\n")
+                fp.write(df.to_string(index=False))
+            fp.write("\n")
 
 
 if __name__ == "__main__":

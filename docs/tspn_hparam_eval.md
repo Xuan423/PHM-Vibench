@@ -1,73 +1,81 @@
-# TSPN Hyperparameter Evaluation Guide
+# TSPN Contrastive Sweep Guide
 
-本指南说明如何使用新的超参数评估工具对 TSPN 进行对比学习、小样本和优化器配置的系统实验。所有网格默认基于 `TSPNContrastive` + `contrastive_classification` + `contrastive_trainer` 的组合，以便统一处理投影层与小样本采样；仅基线配置会回退到原始 `TSPN`/`Default_task`/`Default_trainer` 组合。
+本指南说明如何运行精简后的 TSPN 对比式小样本超参数搜索。新的流程仅维护一份网格 `contrastive_grid.yaml`，围绕下列核心参数展开：
+
+- `contrastive_loss_weight`
+- `domains_per_episode`
+- `classes_per_domain`
+- `support_per_class`
+- `query_per_class`
+
+所有实验基于 `configs/demo/X_Single_DG/TSPN_FewShot/contrastive.yaml` 导入的默认配置，确保搜索结果可直接与官方 Demo 对齐。
 
 ## 1. 环境准备
 
-1. 激活项目虚拟环境，并确保依赖已安装：
+1. 激活项目虚拟环境并安装依赖：
    ```bash
    pip install -r requirements.txt
    ```
-2. 如果需要指定 GPU，可在运行脚本前设置环境变量：
+2. 可选：通过环境变量指定 GPU：
    ```bash
-   export TSPN_EVAL_DEVICES=0,1  # 示例：使用第 0 和第 1 块 GPU
+   export TSPN_EVAL_DEVICES=0,1
    ```
-3. 所有实验输出默认写入 `save/hparam_eval/`，不需要提前创建。
+3. 输出默认写入 `save/hparam_eval/`，无需手动创建目录。
 
 ## 2. 快速开始
 
-运行统一入口脚本即可触发评估：
+执行入口脚本即可生成所有组合：
 ```bash
-script/hparam_eval/run_tspn_hparam_eval.sh --sweep all --max-parallel 2
+script/hparam_eval/run_tspn_hparam_eval.sh --max-parallel 2
 ```
-典型参数说明：
-- `--sweep {contrastive|fewshot|optimizer|baseline|all}`：选择要执行的实验族。
-- `--max-parallel N`：控制并行运行的进程数，单机默认顺序执行。
-- `--timeout SEC`：设置单个实验的超时时间，0 表示不限制。
-- `--rerun-failed`：自动重跑一次失败实验。
-- `--dry-run`：只打印计划执行的命令，不真正启动实验。
+常用参数：
+- `--max-parallel N`：并行运行的进程数，默认串行执行。
+- `--timeout SEC`：单个实验的超时时间，0 表示无限制。
+- `--rerun-failed`：在首次 sweep 结束后重试失败任务。
+- `--limit K`：仅生成前 `K` 条组合，便于调试。
+- `--dry-run`：只打印计划命令，不实际启动训练。
 
-## 3. 进阶选项
+脚本接受的其他参数会透传给 Python 模块 `script.hparam_eval.tspn_hparam_eval`。
 
-| 环境变量              | 作用                                           |
-|-----------------------|------------------------------------------------|
-| `PYTHON_BIN`          | 指定 Python 解释器路径                         |
-| `CONFIG_ROOT`         | 自定义超参数网格配置目录                       |
-| `OUTPUT_ROOT`         | 自定义评估结果根目录                          |
-| `TSPN_EVAL_DEVICES`   | 转发给脚本的 `--devices` 参数                  |
-| `TSPN_EVAL_PIPELINE`  | 指定 `main.py` 的 `--pipeline` 取值            |
-| `TSPN_EVAL_TIMEOUT`   | 默认超时时间（秒），可被命令行重写             |
+## 3. 环境变量
 
-除环境变量外，脚本的其余参数都会完整透传给 `script/hparam_eval/tspn_hparam_eval.py`。
+| 变量名                | 说明                                                         |
+|-----------------------|--------------------------------------------------------------|
+| `PYTHON_BIN`          | 指定 Python 解释器（默认使用当前环境中的 `python`/`python3`） |
+| `CONFIG_ROOT`         | 自定义网格配置目录，默认为 `configs/experiments/tspn_hparam_eval` |
+| `OUTPUT_ROOT`         | 自定义输出根目录，默认为 `save/hparam_eval`                 |
+| `TSPN_EVAL_DEVICES`   | 作为 `--devices` 传递给 Python 脚本                          |
+| `TSPN_EVAL_PIPELINE`  | 传递给 `main.py` 的 `--pipeline`                             |
+| `TSPN_EVAL_TIMEOUT`   | 默认超时时间（秒），可被命令行参数覆盖                       |
+| `TSPN_EVAL_NOTES`     | 附加备注，将写入 `environment.notes`                         |
 
 ## 4. 输出结构
 
-完成后将在 `save/hparam_eval/` 下生成结构化结果：
+运行完成后可在 `save/hparam_eval/` 下看到如下目录：
 ```
 save/hparam_eval/
-  ├── baseline/
-  │   └── baseline_original/
   ├── contrastive/
-  │   └── ...
-  ├── fewshot/
-  │   └── ...
-  ├── optimizer/
-  │   └── ...
-  ├── summary_metrics.csv
-  └── summary_report.md
+  │   └── contrastive__contrastive_loss_weight_0p1__domains_per_episode_3__...
+  │       ├── train.log
+  │       ├── resolved_config.yaml
+  │       ├── lightning_logs/…
+  │       └── run_summary.json
+  ├── contrastive_sweep_summary.csv
+  └── contrastive_sweep_summary.md
 ```
-- 每个运行目录包含 `train.log`、`resolved_config.yaml`、复制的 Lightning `lightning_logs/` 以及 `run_summary.json`。
-- 顶层 `summary_metrics.csv` 汇总所有指标；`summary_report.md` 以 Markdown 表格形式展示结果和基线差异。
+- 每个运行目录包含训练日志、解析后的配置文件以及 Lightning 日志拷贝。
+- 顶层 `contrastive_sweep_summary.csv`/`.md` 汇总每条组合的超参数、`test_acc`、运行状态与时长。
 
-## 5. 调参与排错
+## 5. 调参与排错建议
 
-- 如果日志目录缺失，确认 `save/` 目录有写权限，且 `environment.project` 名称不会与旧实验冲突。
-- 如需快速验证，可使用 `--limit 2 --dry-run` 生成两条配置并查看生成的临时 YAML。
-- 失败任务的标准输出会保存在各自目录的 `train.log` 中。
+- 使用 `--dry-run` 搭配 `--limit`，可快速检查生成的覆盖配置。
+- 若日志未同步到 `save/`，确认运行账户对该目录拥有写权限。
+- 失败运行的详细错误位于对应目录的 `train.log`。
+- 汇总表中的 `test_acc` 若为 `NaN`，表示该运行未产出有效测试指标（可能因失败或超时）。
 
-## 6. 高算力服务器运行建议
+## 6. 高算力服务器提示
 
-- 在集群或高算力服务器上，建议结合 `--max-parallel` 与作业调度器（如 Slurm）使用，保证 GPU 占用合理。
-- 如需断点续跑，可在已有结果目录的基础上调用 `--rerun-failed`，脚本会重跑之前失败的配置并更新汇总报告。
+- 建议结合调度器设定 `--max-parallel`，避免 GPU 资源冲突。
+- 通过 `--rerun-failed` 可以在修复故障后重跑失败配置并自动更新汇总表。
 
-以上即为 TSPN 超参数评估工具的使用说明，欢迎根据团队需求扩展 YAML 网格或脚本逻辑。
+如需扩展搜索范围，可在现有 YAML 基础上增补新的取值列表；保持字段命名与脚本解析逻辑一致即可。

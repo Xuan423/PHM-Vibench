@@ -1,15 +1,8 @@
 import pandas as pd
 import pytest
-from pathlib import Path
 
 from script.hparam_eval.utils import build_override, launch_experiment, load_metrics, LaunchResult
-from script.hparam_eval.tspn_hparam_eval import (
-    CONFIG_ROOT_DEFAULT,
-    OUTPUT_ROOT_DEFAULT,
-    RunResult,
-    RunSpec,
-    summarise_results,
-)
+from script.hparam_eval.tspn_hparam_eval import CONFIG_ROOT_DEFAULT, RunResult, RunSpec, build_run_specs, summarise_results
 
 from src.configs.config_utils import load_config
 
@@ -61,48 +54,88 @@ def test_load_metrics_summary(tmp_path):
     assert info["summary"]["val_total_loss"] == pytest.approx(0.8)
 
 
-def test_summarise_results_creates_reports(tmp_path, monkeypatch):
-    baseline_spec = RunSpec(
-        name="baseline_original",
-        group="baseline",
+def test_summarise_results_creates_reports(tmp_path):
+    success_spec = RunSpec(
+        name="contrastive__loss_weight_0p1__domains_3",
         base_config=BASE_CONFIG,
         overrides={},
-        hyperparams={},
-        output_dir=tmp_path / "baseline",
+        hyperparams={
+            "contrastive_loss_weight": 0.1,
+            "domains_per_episode": 3,
+            "classes_per_domain": 3,
+            "support_per_class": 2,
+            "query_per_class": 5,
+        },
+        output_dir=tmp_path / "contrastive" / "success",
     )
-    baseline_result = RunResult(
-        spec=baseline_spec,
-        launch=LaunchResult(returncode=0, runtime=1.0),
-        status="success",
-        metrics={"summary": {"val_acc": 0.9, "val_total_loss": 0.75}},
-        log_dir=None,
-    )
-
-    contrastive_spec = RunSpec(
-        name="contrastive_loss_0p1",
-        group="contrastive",
-        base_config=BASE_CONFIG,
-        overrides={},
-        hyperparams={"contrastive_loss_weight": 0.1},
-        output_dir=tmp_path / "contrastive",
-    )
-    contrastive_result = RunResult(
-        spec=contrastive_spec,
+    success_result = RunResult(
+        spec=success_spec,
         launch=LaunchResult(returncode=0, runtime=1.2),
         status="success",
-        metrics={"summary": {"val_acc": 0.95, "val_total_loss": 0.7}},
+        metrics={"summary": {"test_acc": 0.92, "val_total_loss": 0.7}},
         log_dir=None,
     )
 
-    summarise_results([baseline_result, contrastive_result], tmp_path)
+    failed_spec = RunSpec(
+        name="contrastive__loss_weight_0p3__domains_4",
+        base_config=BASE_CONFIG,
+        overrides={},
+        hyperparams={
+            "contrastive_loss_weight": 0.3,
+            "domains_per_episode": 4,
+            "classes_per_domain": 3,
+            "support_per_class": 3,
+            "query_per_class": 10,
+        },
+        output_dir=tmp_path / "contrastive" / "failed",
+    )
+    failed_result = RunResult(
+        spec=failed_spec,
+        launch=LaunchResult(returncode=1, runtime=0.8),
+        status="failed",
+        metrics={"summary": {}},
+        log_dir=None,
+    )
 
-    summary_csv = tmp_path / "summary_metrics.csv"
-    summary_md = tmp_path / "summary_report.md"
+    summarise_results([success_result, failed_result], tmp_path)
+
+    summary_csv = tmp_path / "contrastive_sweep_summary.csv"
+    summary_md = tmp_path / "contrastive_sweep_summary.md"
     assert summary_csv.exists()
     assert summary_md.exists()
 
     df = pd.read_csv(summary_csv)
-    delta = df.loc[
-        (df["group"] == "contrastive") & (df["metric"] == "val_acc"), "baseline_delta"
-    ].squeeze()
-    assert delta == pytest.approx(0.05)
+    assert "test_acc" in df.columns
+    success_row = df.loc[df["run_name"] == success_spec.name].squeeze()
+    assert success_row["status"] == "success"
+    assert success_row["test_acc"] == pytest.approx(0.92)
+    assert success_row["contrastive_loss_weight"] == pytest.approx(0.1)
+
+    failed_row = df.loc[df["run_name"] == failed_spec.name].squeeze()
+    assert failed_row["status"] == "failed"
+    assert pytest.isna(failed_row["test_acc"])
+
+
+def test_build_run_specs_respects_target_hyperparams(tmp_path):
+    grid_path = CONFIG_ROOT_DEFAULT / "contrastive_grid.yaml"
+    specs = build_run_specs(
+        grid_path=grid_path,
+        output_root=tmp_path,
+        pipeline=None,
+        global_notes="pytest",
+        limit=3,
+    )
+
+    assert len(specs) == 3
+    expected_keys = {
+        "contrastive_loss_weight",
+        "domains_per_episode",
+        "classes_per_domain",
+        "support_per_class",
+        "query_per_class",
+    }
+    for spec in specs:
+        assert set(spec.hyperparams.keys()) == expected_keys
+        assert spec.output_dir.parent.name == "contrastive"
+        assert spec.overrides["environment.output_dir"] == str(spec.output_dir)
+        assert spec.overrides["environment.project"].startswith("contrastive_")

@@ -5,44 +5,10 @@
 # overrides via the orchestration utilities under script/hparam_eval/.
 
 __include__:
-  - ../../demo/X_Single_DG/TSPN_FewShot/shared.yaml
+  - ../../demo/X_Single_DG/TSPN_FewShot/contrastive.yaml
 
 environment:
-  project: "tspn_hparam_eval"
-  output_dir: "results/tspn_hparam_eval"
-  notes: "Base config for TSPN hyperparameter sweeps."
+  project: "tspn_contrastive_sweep"
+  output_dir: "results/tspn_contrastive_sweep"
+  notes: "Base config for contrastive few-shot hyperparameter sweep."
   iterations: 1
-
-model:
-  name: "TSPNContrastive"
-  contrastive:
-    enabled: false
-    projection_hidden: 256
-    projection_dim: 64
-    temperature: 0.1
-    loss_weight: 0.0
-    mode: "supervised"
-
-task:
-  name: "contrastive_classification"
-  few_shot:
-    enabled: false
-    episodes_per_epoch: 50
-  contrastive:
-    loss_weight: 0.0
-    temperature: 0.1
-    normalize_embeddings: true
-    mode: "supervised"
-  scheduler:
-    name: "step"
-    options:
-      step_size: 5
-      gamma: 0.5
-
-trainer:
-  name: "contrastive_trainer"
-  logging:
-    contrastive_metrics: false
-  callbacks:
-    checkpoint_monitor: "val_total_loss"
-    checkpoint_mode: "min"
