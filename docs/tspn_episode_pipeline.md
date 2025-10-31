@@ -46,49 +46,55 @@ When episode format is disabled (default), standard PyTorch collation is used.
 
 ## Forward & Backward Pass (Episode Mode)
 
-1. **Support encoding** (no gradient):
-   - Support tensors are encoded via `network.encode` under `torch.no_grad()`.
-   - Label-wise prototypes are computed by averaging embeddings within each support slice.
-   - Support projections are detached and reused as positive anchors for contrastive training.
+1. **Support encoding & logits**:
+   - Support tensors are forwarded through `TSPNContrastive` with gradients enabled, producing indicator embeddings, logits, and projector penalties.
+   - Label-wise prototypes are computed by averaging support embeddings within each slice and can be used for prototype alignment loss (`task.contrastive.support_loss.mode="prototype"` or `"hybrid"`).
+   - Support logits contribute to cross-entropy (`mode="cross_entropy"`/`"hybrid"`) so labelled shots actively steer the backbone.
 2. **Query forward** (with gradient):
    - Query tensors are forwarded through the contrastive TSPN wrapper with `return_embeddings=True`.
    - Classification logits and projected embeddings are produced only for queries.
 3. **Loss evaluation**:
-   - Cross-entropy is computed on query logits using their ground-truth labels.
-   - Optional regularisation losses reuse the existing factory utilities.
-   - The contrastive objective concatenates detached support projections with query projections so queries receive gradients while supports contribute positives without gradient flow.
+   - Query CE and existing regularisation losses mirror the legacy pipeline.
+   - Support CE/prototype terms are aggregated according to `task.contrastive.support_loss` weights.
+   - Contrastive similarity matrices are split into `support_support`, `support_query`, and `query_query` branches. Positive counts normalise each branch before adaptive re-weighting (`task.contrastive.weighting.strategy`).
+   - Physical projector penalties (e.g. L1 sparsity) are added automatically when `model.contrastive.physical_projector.enabled=true`.
 4. **Backpropagation**:
-   - Gradients trickle back exclusively through the query branch (logits and projections) ensuring the support set acts as a static context.
-   - Optimiser updates mirror the legacy trainer; only the loss composition changes.
+   - Gradients propagate through both support and query embeddings whenever support losses are active; branch weights balance the InfoNCE contributions.
+   - Logged metrics expose per-branch losses/weights and projector penalties to simplify debugging.
 
 ## Loss Composition
 
 | Component | Source | Notes |
 |-----------|--------|-------|
-| `ce_loss` | Query logits vs. query labels | Primary classification signal |
-| Regularisation | Configured in `task.regularization` | Applied unchanged |
-| Contrastive | Query projections (gradients) + detached support/query positives | Weighted by `task.contrastive.loss_weight` |
+| `query_ce` | Query logits vs. query labels | Primary classification signal |
+| `support_ce`, `support_proto` | Configured via `task.contrastive.support_loss` | Weighted by component weights then scaled by `loss_weight` |
+| Projector penalties | `model.contrastive.physical_projector` sparsity/prior terms | Logged as `*_indicator_penalty_*` |
+| Regularisation | Existing `task.regularization` block | Applied unchanged |
+| Branch contrastive | `support_support`, `support_query`, `query_query` InfoNCE branches | Normalised by positive counts then re-weighted (GradNorm/uncertainty) before multiplying by `task.contrastive.loss_weight` |
 
-Total loss = `ce_loss + regularisation + contrastive_weight * contrastive_loss`.
+See [`docs/tspn_loss_composition.md`](tspn_loss_composition.md) for a derivation of the full objective.
 
 ## Outputs and Artefacts
 
-- **Metrics**: All accuracy/loss metrics now reflect query batch sizes; the logged batch size equals the number of query samples.
+- **Metrics**: Query-aligned accuracy, support loss components, branch losses/weights (`*_contrastive_{branch}_*`), and projector penalties are logged per stage.
 - **Prototype norms**: When `task.contrastive.log_components=true`, average prototype norms are emitted per stage (`train_prototype_norm_mean`, etc.).
-- **Explainability**: Validation/test embeddings cache query projections and file IDs, so produced attribution files correspond to the evaluation portion of each episode.
-- **Saved embeddings**: If `task.explainability.summary.save_embeddings=true`, outputs in `save/<run>/explainability/` contain query embeddings and the detached support prototypes for post-hoc analysis.
+- **Explainability**: Validation/test caches now include indicator weights, optional projection matrices, and batch-wise branch weights. Exports provide:
+  - `indicator_weights.csv` / `.pt` – per-class indicator mappings.
+  - `branch_weights_batches.csv` / `branch_weight_summary.csv` – diagnostics for adaptive weighting.
+  - Existing top-feature CSVs and optional embedding dumps (`task.explainability.summary.save_embeddings=true`).
 
 ## Configuration Checklist
 
 1. Set `task.few_shot.enabled=true` and `task.few_shot.format="episode"` to activate episode-aware mode.
-2. Tune `support_per_class` / `query_per_class`; shortfalls are logged but layouts still preserve per-class slices.
-3. Adjust `task.contrastive.loss_weight` and `task.contrastive.mode` to control the influence of support-derived positives.
-4. Leave `task.few_shot.format` unset or `"flat"` to maintain prior behaviour.
+2. Configure `model.contrastive.physical_projector` (indicator dimension, sparsity, optional prior) to expose the interpretable embedding space.
+3. Tune `task.contrastive.support_loss` and `task.contrastive.weighting` to balance supervised signals and InfoNCE branches; set `loss_weight=0` or `strategy="uniform"` for legacy behaviour.
+4. Adjust `support_per_class` / `query_per_class`; shortfalls are logged but layouts still preserve per-class slices.
+5. Leave `task.few_shot.format` unset or `"flat"` to maintain prior behaviour.
 
 ## Verifying the Setup
 
 - **Dry run**: `python main.py --config configs/demo/X_Single_DG/TSPN_FewShot/contrastive.yaml --pipeline Pipeline_01_default --set environment.iterations=1 --set trainer.num_epochs=1`
-- **Key logs**: Look for `train_batch_size`, `*_contrastive_loss`, and `*_prototype_norm_mean` entries to confirm episode-aware batching is active.
-- **Artifacts**: Inspect `results/<run>/explainability/` for per-episode embeddings reflecting the query-only gradient path.
+- **Key logs**: Expect `*_indicator_penalty_total`, `*_support_ce/proto`, and `*_contrastive_{branch}_weight` alongside `train_batch_size` to confirm projector and adaptive weighting are active.
+- **Artifacts**: Inspect `results/<run>/explainability/` for indicator weight CSV/pt files, branch weight summaries, and per-episode embeddings.
 
 With these changes, the support/query semantics selected during sampling are preserved through training, enabling stable few-shot contrastive episodes and clearer separation between adaptation and evaluation roles.

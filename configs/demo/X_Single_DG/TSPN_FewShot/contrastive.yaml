@@ -17,11 +17,21 @@ model:
   name: "TSPNContrastive"
   contrastive:
     enabled: true
-    projection_hidden: 512
-    projection_dim: 128
+    projection_hidden: 0
+    projection_dim: 0
     temperature: &contrastive_temp 0.2
     loss_weight: &contrastive_loss_weight 0.2
     mode: "supervised"
+    physical_projector:
+      enabled: true
+      indicator_dim: 64
+      init: "kaiming"
+      sparsity_l1: 1.0e-4
+      sparsity_group: 0.0
+      prior:
+        path: null
+        format: "npy"
+        temperature: 1.0
   mining:
     strategy: "domain"
 
@@ -48,6 +58,19 @@ task:
     temperature: *contrastive_temp
     loss_weight: *contrastive_loss_weight
     normalize_embeddings: true
+    support_loss:
+      mode: "hybrid"
+      loss_weight: 0.5
+      ce_weight: 1.0
+      prototype_weight: 0.5
+      prototype_metric: "cosine"
+      detach_prototypes: false
+      log_prefix: "support"
+    weighting:
+      strategy: "gradnorm"
+      alpha: 0.5
+      ema: 0.9
+      temperature: 1.0
   explainability:
     enabled: true
     output_subdir: "explainability"

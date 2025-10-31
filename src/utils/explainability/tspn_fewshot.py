@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 import torch
@@ -56,6 +56,10 @@ def export_tspn_explainability(
 
     # Aggregate embeddings per (system, domain).
     grouped: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    stage_indicator_weights: Optional[Dict[str, torch.Tensor]] = None
+    stage_projection_matrix: Optional[torch.Tensor] = None
+    branch_weight_records: List[Dict[str, float]] = []
+
     for batch in cached_batches:
         embeddings = batch["embeddings"]
         file_ids = batch["file_ids"]
@@ -74,6 +78,22 @@ def export_tspn_explainability(
             grouped.setdefault(key, {"embeddings": [], "labels": []})
             grouped[key]["embeddings"].append(embeddings[idx].cpu())
             grouped[key]["labels"].append(int(labels[idx]))
+
+        indicator_weights_batch = batch.get("indicator_weights")
+        if indicator_weights_batch and stage_indicator_weights is None:
+            stage_indicator_weights = {
+                key: torch.as_tensor(tensor) for key, tensor in indicator_weights_batch.items()
+            }
+
+        projection_matrix_batch = batch.get("projection_matrix")
+        if projection_matrix_batch is not None and stage_projection_matrix is None:
+            stage_projection_matrix = torch.as_tensor(projection_matrix_batch)
+
+        branch_weights_batch = batch.get("branch_weights")
+        if branch_weights_batch:
+            branch_weight_records.append(
+                {branch: float(value) for branch, value in branch_weights_batch.items()}
+            )
 
     for (system, domain), payload in grouped.items():
         emb_tensor = _stack_embeddings(payload["embeddings"]).cpu()
@@ -113,3 +133,56 @@ def export_tspn_explainability(
         if save_embeddings:
             emb_path = stage_dir / f"system_{system}_domain_{domain}_embeddings.pt"
             torch.save({"embeddings": emb_tensor, "labels": label_tensor}, emb_path)
+
+    if stage_indicator_weights is not None:
+        weight_tensor = stage_indicator_weights.get("weight")
+        if weight_tensor is not None:
+            rows = []
+            for class_idx in range(weight_tensor.size(0)):
+                for indicator_idx in range(weight_tensor.size(1)):
+                    rows.append(
+                        {
+                            "class": class_idx,
+                            "indicator": indicator_idx,
+                            "weight": weight_tensor[class_idx, indicator_idx].item(),
+                        }
+                    )
+            weight_df = pd.DataFrame(rows)
+            weight_df.to_csv(stage_dir / "indicator_weights.csv", index=False)
+        torch.save(stage_indicator_weights, stage_dir / "indicator_weights.pt")
+
+    if stage_projection_matrix is not None:
+        torch.save(stage_projection_matrix, stage_dir / "projection_matrix.pt")
+
+    if branch_weight_records:
+        flat_rows = []
+        for batch_idx, record in enumerate(branch_weight_records):
+            for branch, value in record.items():
+                flat_rows.append(
+                    {
+                        "batch": batch_idx,
+                        "branch": branch,
+                        "weight": value,
+                    }
+                )
+        pd.DataFrame(flat_rows).to_csv(stage_dir / "branch_weights_batches.csv", index=False)
+
+        summary_rows = []
+        for branch in {key for record in branch_weight_records for key in record.keys()}:
+            values = torch.tensor(
+                [record.get(branch, float("nan")) for record in branch_weight_records],
+                dtype=torch.float32,
+            )
+            valid = values[~torch.isnan(values)]
+            if valid.numel() == 0:
+                continue
+            summary_rows.append(
+                {
+                    "branch": branch,
+                    "mean_weight": valid.mean().item(),
+                    "std_weight": valid.std(unbiased=False).item(),
+                    "count": int(valid.numel()),
+                }
+            )
+        if summary_rows:
+            pd.DataFrame(summary_rows).to_csv(stage_dir / "branch_weight_summary.csv", index=False)

@@ -1,63 +1,33 @@
-# JUST scenario: enable few-shot TSPN DG towards system 18 / domain 9.
-
 __include__:
-  - base.yaml
+  - contrastive.yaml
 
 environment:
-  project: "tspn_fewshot_just"
-  output_dir: "results/tspn_fewshot_just"
-  notes: "Few-shot TSPN DG run targeting JUST system 18 domain 9."
+  project: "tspn_fewshot_sdust"
+  output_dir: "results/tspn_fewshot_sdust"
+  notes: "Few-shot TSPN DG run targeting SDUST9."
   iterations: 1
   swanlab: false
 
-data:
-  batch_size: &bs 32
-
 model:
-  name: "TSPNContrastive"
+  num_classes: 10
   in_channels : 6
   contrastive:
-    enabled: true
-    projection_hidden: 512
-    projection_dim: 128
-    temperature: &contrastive_temp 0.2
     loss_weight: &contrastive_loss_weight 0.2
-    mode: "supervised"
-  mining:
-    strategy: "domain"
 
 task:
-  name: "contrastive_classification"
   target_system_id: [21]
-  target_domain_id: [33]
+  target_domain_id: [37] #37
   source_domain_id: [0,4,9,13,17,21]
-  batch_size: *bs
-  epochs: &num_epoch 100
-  lr: 0.002
-  es_patience: &es_patience 50
-  step_size: 5
   few_shot:
     enabled: true
     sampler: "hierarchical"
     systems_per_episode: 1
     domains_per_episode: 4
     classes_per_domain: 6
-    support_per_class: 5
+    support_per_class: 3
     query_per_class: 10
     preserve_labels: true
-    episodes_per_epoch: 10
+    episodes_per_epoch: 30
     warn_on_shortfall: true
-  contrastive:
-    temperature: *contrastive_temp
-    loss_weight: *contrastive_loss_weight
-    normalize_embeddings: true
+    format: "episode"
 
-trainer:
-  name: "contrastive_trainer"
-  num_epochs: *num_epoch
-  patience: *es_patience
-  logging:
-    contrastive_metrics: true
-  callbacks:
-    checkpoint_monitor: "val_total_loss"
-    checkpoint_mode: "min"
