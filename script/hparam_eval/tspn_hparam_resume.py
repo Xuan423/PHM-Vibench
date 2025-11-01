@@ -14,6 +14,7 @@ from .tspn_hparam_eval import (
     RunSpec,
     build_run_specs,
     execute_runs,
+    extract_test_metrics_from_log,
     parse_device_pool,
     summarise_results,
 )
@@ -117,7 +118,19 @@ def collect_run_results(run_specs: Sequence[RunSpec]) -> Sequence[RunResult]:
                 timed_out=bool(record.get("timed_out", False)),
                 error=record.get("error"),
             )
-            metrics = {"summary": record.get("metrics", {})}
+            record_metrics = record.get("metrics") or {}
+            if not isinstance(record_metrics, dict):
+                record_metrics = {}
+            metrics = {"summary": dict(record_metrics)}
+            log_metrics = extract_test_metrics_from_log(spec.output_dir / "train.log")
+            if log_metrics:
+                summary_dict = metrics.get("summary")
+                if not isinstance(summary_dict, dict):
+                    summary_dict = {}
+                summary_dict = dict(summary_dict)
+                for key, value in log_metrics.items():
+                    summary_dict.setdefault(key, value)
+                metrics["summary"] = summary_dict
             status = record.get("status", "unknown")
             results.append(RunResult(spec=spec, launch=launch, status=status, metrics=metrics, log_dir=log_dir))
         else:

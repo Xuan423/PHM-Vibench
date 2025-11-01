@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import itertools
 import math
+import re
 import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -62,6 +63,35 @@ class RunResult:
     status: str
     metrics: Dict[str, Any]
     log_dir: Optional[Path]
+
+
+TEST_METRIC_PATTERN = re.compile(
+    r"(?P<name>test_acc[\w\-/\.]*)\s*(?:=|:)\s*(?P<value>[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*(?P<percent>%?)"
+)
+
+
+def extract_test_metrics_from_log(log_path: Path) -> Dict[str, float]:
+    """Parse ``train.log`` for test accuracy-style metrics when Lightning summaries are absent."""
+    metrics: Dict[str, float] = {}
+    if not log_path.exists():
+        return metrics
+    try:
+        with log_path.open("r", encoding="utf-8", errors="ignore") as fp:
+            for line in fp:
+                for match in TEST_METRIC_PATTERN.finditer(line):
+                    name = match.group("name")
+                    value_str = match.group("value")
+                    percent = match.group("percent")
+                    try:
+                        value = float(value_str)
+                    except ValueError:
+                        continue
+                    if percent:
+                        value /= 100.0
+                    metrics[name] = value
+    except OSError:
+        return {}
+    return metrics
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -378,6 +408,15 @@ def execute_runs(
                 spec.log_dir = log_dir
                 metrics_info = load_metrics(log_dir)
                 copy_artifacts(log_dir, spec.output_dir)
+            log_metrics = extract_test_metrics_from_log(log_path)
+            if log_metrics:
+                summary_dict = metrics_info.get("summary")
+                if not isinstance(summary_dict, dict):
+                    summary_dict = {}
+                summary_dict = dict(summary_dict)
+                for key, value in log_metrics.items():
+                    summary_dict.setdefault(key, value)
+                metrics_info["summary"] = summary_dict
         export_json(
             {
                 "run_name": spec.name,
@@ -462,22 +501,44 @@ def summarise_results(results: Sequence[RunResult], output_root: Path) -> None:
 
     rows: List[Dict[str, Any]] = []
     all_param_keys: set[str] = set()
+    metric_keys: set[str] = set()
+
+    def pick_primary_test_acc(summary: Mapping[str, Any]) -> float:
+        if "test_acc" in summary and summary["test_acc"] is not None:
+            try:
+                return float(summary["test_acc"])
+            except (TypeError, ValueError):
+                return math.nan
+        for key in sorted(summary.keys()):
+            if key.startswith("test_acc") and summary[key] is not None:
+                try:
+                    return float(summary[key])
+                except (TypeError, ValueError):
+                    continue
+        return math.nan
+
     for result in results:
         summary = result.metrics.get("summary", {}) if result.metrics else {}
         row: Dict[str, Any] = {
             "run_name": result.spec.name,
             "status": result.status,
             "runtime_sec": result.launch.runtime,
-            "test_acc": summary.get("test_acc", math.nan),
+            "test_acc": pick_primary_test_acc(summary),
         }
         for key, value in result.spec.hyperparams.items():
             row[key] = value
             all_param_keys.add(key)
+        for metric_key, metric_value in summary.items():
+            if metric_key == "test_acc":
+                continue
+            metric_keys.add(metric_key)
+            row[metric_key] = metric_value
         rows.append(row)
 
     df = pd.DataFrame(rows)
     param_columns = sorted(all_param_keys)
-    preferred_cols = ["run_name", "status"] + param_columns + ["test_acc", "runtime_sec"]
+    metric_columns = sorted(metric_keys)
+    preferred_cols = ["run_name", "status"] + param_columns + ["test_acc"] + metric_columns + ["runtime_sec"]
     existing_cols = [col for col in preferred_cols if col in df.columns]
     if existing_cols:
         df = df[existing_cols]
