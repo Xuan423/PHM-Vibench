@@ -42,9 +42,28 @@ script/hparam_eval/run_tspn_hparam_eval.sh --max-parallel 2
 ```bash
 script/hparam_eval/run_tspn_hparam_resume.sh --max-parallel 2 --device-pool 0,1
 ```
-该脚本会扫描 `save/hparam_eval/contrastive/` 下的 `run_summary.json`，跳过已成功的组合，仅针对缺失或失败的项目重新启动，并在结束后刷新汇总表。
+该脚本会扫描 `save/hparam_eval/contrastive/` 下的 `run_summary.json`，跳过已成功的组合，仅针对缺失或失败的项目重新启动。脚本本身不再生成汇总文件，详见下节的独立统计工具。
 
-## 3. 环境变量
+
+## 3. 结果汇总（无需重新训练）
+
+旧版 sweep 会尝试写入 `contrastive_sweep_summary.csv`，但在多系统场景下缺失 `test_acc_*` 指标。现在请使用全新的脚本：
+
+```bash
+python script/hparam_eval/tspn_resummarise.py \
+    --root save/metadata_9_29.xlsx/M_TSPNContrastive \
+    --output save/metadata_9_29.xlsx/tspn_resummary.csv \
+    --markdown save/metadata_9_29.xlsx/tspn_resummary.md
+```
+
+该工具会为每个 `iter_*` 目录提取：
+- Hyper参数（`contrastive_loss_weight`、`support_per_class` 等）；
+- `train.log` 中的 `test_acc_*` 行（含系统名称）；
+- Lightning `metrics.csv` 与 `test_result_*.csv` 的最终指标。
+
+输出表包含 `test_acc`（自动选择首个 `test_acc*` 键）以及 `test_acc_source`，便于追溯真实系统名称，同时保留所有原始字段。
+
+## 4. 环境变量
 
 | 变量名                | 说明                                                         |
 |-----------------------|--------------------------------------------------------------|
@@ -57,7 +76,7 @@ script/hparam_eval/run_tspn_hparam_resume.sh --max-parallel 2 --device-pool 0,1
 | `TSPN_EVAL_TIMEOUT`   | 默认超时时间（秒），可被命令行参数覆盖                       |
 | `TSPN_EVAL_NOTES`     | 附加备注，将写入 `environment.notes`                         |
 
-## 4. 输出结构
+## 5. 输出结构
 
 运行完成后可在 `save/hparam_eval/` 下看到如下目录：
 ```
@@ -68,20 +87,18 @@ save/hparam_eval/
   │       ├── resolved_config.yaml
   │       ├── lightning_logs/…
   │       └── run_summary.json
-  ├── contrastive_sweep_summary.csv
-  └── contrastive_sweep_summary.md
 ```
 - 每个运行目录包含训练日志、解析后的配置文件以及 Lightning 日志拷贝。
-- 顶层 `contrastive_sweep_summary.csv`/`.md` 汇总每条组合的超参数、`test_acc`、运行状态与时长。
+- 需要汇总指标时，请运行 `tspn_resummarise.py` 将结果写到你指定的 `tspn_resummary.csv`/`.md`。
 
-## 5. 调参与排错建议
+## 6. 调参与排错建议
 
 - 使用 `--dry-run` 搭配 `--limit`，可快速检查生成的覆盖配置。
 - 若日志未同步到 `save/`，确认运行账户对该目录拥有写权限。
 - 失败运行的详细错误位于对应目录的 `train.log`。
-- 汇总表中的 `test_acc` 若为 `NaN`，表示该运行未产出有效测试指标（可能因失败或超时）。
+- 若 `tspn_resummarise.py` 输出的 `test_acc` 为 `NaN`，表示该运行未产出带 `test_acc*` 的指标（可能因失败或超时）。
 
-## 6. 高算力服务器提示
+## 7. 高算力服务器提示
 
 - 建议结合调度器设定 `--max-parallel`，避免 GPU 资源冲突。
 - 通过 `--rerun-failed` 可以在修复故障后重跑失败配置并自动更新汇总表。

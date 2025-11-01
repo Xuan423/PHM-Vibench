@@ -10,15 +10,11 @@ from typing import Any, Dict, Optional, Sequence
 from .tspn_hparam_eval import (
     CONFIG_ROOT_DEFAULT,
     OUTPUT_ROOT_DEFAULT,
-    RunResult,
     RunSpec,
     build_run_specs,
     execute_runs,
-    extract_test_metrics_from_log,
     parse_device_pool,
-    summarise_results,
 )
-from .utils import LaunchResult
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -105,40 +101,6 @@ def load_run_record(summary_path: Path) -> Optional[Dict[str, Any]]:
         return None
 
 
-def collect_run_results(run_specs: Sequence[RunSpec]) -> Sequence[RunResult]:
-    results: list[RunResult] = []
-    for spec in run_specs:
-        summary_path = spec.output_dir / "run_summary.json"
-        record = load_run_record(summary_path)
-        if record:
-            log_dir = Path(record["log_dir"]) if record.get("log_dir") else None
-            launch = LaunchResult(
-                returncode=int(record.get("returncode", 0) or 0),
-                runtime=float(record.get("runtime_sec", 0.0) or 0.0),
-                timed_out=bool(record.get("timed_out", False)),
-                error=record.get("error"),
-            )
-            record_metrics = record.get("metrics") or {}
-            if not isinstance(record_metrics, dict):
-                record_metrics = {}
-            metrics = {"summary": dict(record_metrics)}
-            log_metrics = extract_test_metrics_from_log(spec.output_dir / "train.log")
-            if log_metrics:
-                summary_dict = metrics.get("summary")
-                if not isinstance(summary_dict, dict):
-                    summary_dict = {}
-                summary_dict = dict(summary_dict)
-                for key, value in log_metrics.items():
-                    summary_dict.setdefault(key, value)
-                metrics["summary"] = summary_dict
-            status = record.get("status", "unknown")
-            results.append(RunResult(spec=spec, launch=launch, status=status, metrics=metrics, log_dir=log_dir))
-        else:
-            launch = LaunchResult(returncode=-1, runtime=0.0)
-            results.append(RunResult(spec=spec, launch=launch, status="missing", metrics={"summary": {}}, log_dir=None))
-    return results
-
-
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
 
@@ -186,7 +148,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if not todo_specs:
         print("[INFO] All runs already completed; nothing to resume.")
-        summarise_results(collect_run_results(run_specs), output_root)
+        print(
+            "[INFO] To regenerate consolidated metrics (for example test_acc per system), "
+            "run the standalone summariser:\n"
+            f"       python script/hparam_eval/tspn_resummarise.py --root {output_root}"
+        )
         return 0
 
     device_pool = parse_device_pool(args.device_pool)
@@ -217,7 +183,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             retry_lookup = {res.spec.name: res for res in retry_results}
             results = [retry_lookup.get(res.spec.name, res) for res in results]
 
-    summarise_results(collect_run_results(run_specs), output_root)
+    if not args.dry_run:
+        print(
+            "[INFO] Resume pass complete. Rebuild the aggregate table with:\n"
+            f"       python script/hparam_eval/tspn_resummarise.py --root {output_root}"
+        )
     return 0
 
 
