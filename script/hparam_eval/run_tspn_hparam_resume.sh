@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Wrapper around the TSPN hyperparameter sweep Python entrypoint.
+# Helper script for resuming partial TSPN hyperparameter sweeps.
 
 set -euo pipefail
 
@@ -14,12 +14,10 @@ if [[ -z "${PYTHON_BIN:-}" ]]; then
   fi
 fi
 
-# Ensure CONFIG_ROOT points to the correct directory
 CONFIG_ROOT="${CONFIG_ROOT:-${REPO_ROOT}/configs/experiments/tspn_hparam_eval}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-${REPO_ROOT}/save/hparam_eval}"
 
-# Add the project root to PYTHONPATH to fix relative import issues
-export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}" # Ensure PYTHONPATH is initialized
+export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 
 ARGS=("--config-root" "${CONFIG_ROOT}" "--output-root" "${OUTPUT_ROOT}")
 
@@ -43,5 +41,4 @@ if [[ -n "${TSPN_EVAL_NOTES:-}" ]]; then
   ARGS+=("--notes" "${TSPN_EVAL_NOTES}")
 fi
 
-# Use python -m to run the orchestrator module
-exec "${PYTHON_BIN}" -m script.hparam_eval.tspn_hparam_eval "${ARGS[@]}" "$@"
+exec "${PYTHON_BIN}" -m script.hparam_eval.tspn_hparam_resume "${ARGS[@]}" "$@"

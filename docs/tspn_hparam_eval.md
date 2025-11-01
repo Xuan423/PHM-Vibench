@@ -33,9 +33,16 @@ script/hparam_eval/run_tspn_hparam_eval.sh --max-parallel 2
 - `--timeout SEC`：单个实验的超时时间，0 表示无限制。
 - `--rerun-failed`：在首次 sweep 结束后重试失败任务。
 - `--limit K`：仅生成前 `K` 条组合，便于调试。
+- `--device-pool 0,1`：指定可用 GPU 列表，每次运行占用其中一张卡，避免抢同一设备。
 - `--dry-run`：只打印计划命令，不实际启动训练。
 
 脚本接受的其他参数会透传给 Python 模块 `script.hparam_eval.tspn_hparam_eval`。
+
+若运行过程意外中断，可通过补跑脚本恢复未完成的组合：
+```bash
+script/hparam_eval/run_tspn_hparam_resume.sh --max-parallel 2 --device-pool 0,1
+```
+该脚本会扫描 `save/hparam_eval/contrastive/` 下的 `run_summary.json`，跳过已成功的组合，仅针对缺失或失败的项目重新启动，并在结束后刷新汇总表。
 
 ## 3. 环境变量
 
@@ -45,6 +52,7 @@ script/hparam_eval/run_tspn_hparam_eval.sh --max-parallel 2
 | `CONFIG_ROOT`         | 自定义网格配置目录，默认为 `configs/experiments/tspn_hparam_eval` |
 | `OUTPUT_ROOT`         | 自定义输出根目录，默认为 `save/hparam_eval`                 |
 | `TSPN_EVAL_DEVICES`   | 作为 `--devices` 传递给 Python 脚本                          |
+| `TSPN_EVAL_DEVICE_POOL` | 指定 GPU 池（例如 `0,1`），与 `--device-pool` 等效            |
 | `TSPN_EVAL_PIPELINE`  | 传递给 `main.py` 的 `--pipeline`                             |
 | `TSPN_EVAL_TIMEOUT`   | 默认超时时间（秒），可被命令行参数覆盖                       |
 | `TSPN_EVAL_NOTES`     | 附加备注，将写入 `environment.notes`                         |
