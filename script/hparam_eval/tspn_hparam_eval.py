@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import itertools
 import math
 import re
@@ -166,6 +167,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default="",
         help="Additional notes appended to environment.notes for each run.",
     )
+    parser.add_argument(
+        "--resummarise",
+        action="store_true",
+        help="Rebuild summaries from existing outputs and train.log without launching new runs.",
+    )
     return parser.parse_args(argv)
 
 
@@ -175,6 +181,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     config_root: Path = args.config_root
     output_root: Path = args.output_root
     output_root.mkdir(parents=True, exist_ok=True)
+
+    if args.resummarise:
+        print(f"[INFO] Rebuilding summaries from existing runs under {output_root}")
+        results = collect_existing_results(output_root)
+        summarise_results(results, output_root)
+        return 0
 
     grid_path = args.grid if args.grid else (config_root / "contrastive_grid.yaml")
     run_specs = build_run_specs(
@@ -493,6 +505,113 @@ def copy_artifacts(log_dir: Path, output_dir: Path) -> None:
     if target_dir.exists():
         shutil.rmtree(target_dir)
     shutil.copytree(log_dir.parent, target_dir)
+
+
+def collect_existing_results(output_root: Path) -> List[RunResult]:
+    sweep_root = output_root / "contrastive"
+    if not sweep_root.exists():
+        print(f"[WARN] Sweep directory not found: {sweep_root}")
+        return []
+
+    run_dirs = sorted([path for path in sweep_root.iterdir() if path.is_dir()])
+    if not run_dirs:
+        print(f"[WARN] No run directories detected under {sweep_root}")
+        return []
+
+    results: List[RunResult] = []
+    for run_dir in run_dirs:
+        summary_path = run_dir / "run_summary.json"
+        summary_data: Dict[str, Any] = {}
+        if summary_path.exists():
+            try:
+                with summary_path.open("r", encoding="utf-8") as fp:
+                    summary_data = json.load(fp)
+            except json.JSONDecodeError:
+                print(f"[WARN] Failed to parse {summary_path}; proceeding with defaults.")
+
+        hyperparams = dict(summary_data.get("hyperparams") or {})
+        overrides = dict(summary_data.get("overrides") or {})
+        pipeline = summary_data.get("pipeline")
+        runtime_raw = summary_data.get("runtime_sec")
+        try:
+            runtime = float(runtime_raw) if runtime_raw is not None else 0.0
+        except (TypeError, ValueError):
+            runtime = 0.0
+
+        returncode_raw = summary_data.get("returncode", 0)
+        try:
+            returncode = int(returncode_raw)
+        except (TypeError, ValueError):
+            returncode = 0
+
+        resolved_config = run_dir / "resolved_config.yaml"
+        base_config = resolved_config
+        config_path_raw = summary_data.get("config_path")
+        config_path = None
+        if isinstance(config_path_raw, str):
+            config_path = Path(config_path_raw)
+        elif resolved_config.exists():
+            config_path = resolved_config
+
+        spec = RunSpec(
+            name=run_dir.name,
+            base_config=base_config,
+            overrides=overrides,
+            hyperparams=hyperparams,
+            output_dir=run_dir,
+            pipeline=pipeline,
+            config_path=config_path,
+            log_dir=None,
+        )
+
+        metrics_info: Dict[str, Any] = {"summary": {}}
+        log_dir: Optional[Path] = None
+
+        lightning_root = run_dir / "lightning_logs"
+        metrics_file: Optional[Path] = None
+        if lightning_root.exists():
+            candidates = [path for path in lightning_root.rglob("metrics.csv")]
+            if candidates:
+                candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                metrics_file = candidates[0]
+        if metrics_file:
+            metrics_info = load_metrics(metrics_file.parent)
+            log_dir = metrics_file.parent
+
+        log_metrics = extract_test_metrics_from_log(run_dir / "train.log")
+        summary = dict(metrics_info.get("summary") or {})
+        for key, value in log_metrics.items():
+            summary.setdefault(key, value)
+        metrics_info["summary"] = summary
+
+        status = summary_data.get("status") or ("success" if summary else "unknown")
+
+        launch_result = LaunchResult(returncode=returncode, runtime=runtime)
+        result = RunResult(
+            spec=spec,
+            launch=launch_result,
+            status=status,
+            metrics=metrics_info,
+            log_dir=log_dir,
+        )
+        results.append(result)
+
+        summary_payload = dict(summary_data)
+        summary_payload.update(
+            {
+                "run_name": spec.name,
+                "hyperparams": hyperparams,
+                "overrides": overrides,
+                "config_path": str(config_path) if config_path else summary_data.get("config_path"),
+                "log_dir": str(log_dir) if log_dir else summary_data.get("log_dir"),
+                "status": status,
+                "runtime_sec": runtime,
+                "returncode": returncode,
+                "metrics": summary,
+            }
+        )
+        export_json(summary_payload, summary_path)
+    return results
 
 
 def summarise_results(results: Sequence[RunResult], output_root: Path) -> None:
