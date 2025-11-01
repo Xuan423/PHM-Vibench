@@ -7,7 +7,7 @@ environment:
   project: "tspn_contrastive_demo"
   output_dir: "results/tspn_contrastive_demo"
   notes: "Contrastive few-shot DG run for TSPN."
-  iterations: 1
+  iterations: 5
   swanlab: false
 
 data:
@@ -20,7 +20,7 @@ model:
     projection_hidden: 0
     projection_dim: 0
     temperature: &contrastive_temp 0.2
-    loss_weight: &contrastive_loss_weight 0.2
+    loss_weight: &contrastive_loss_weight 0.3
     mode: "supervised"
     physical_projector:
       enabled: true
@@ -47,7 +47,7 @@ task:
     sampler: "hierarchical"
     systems_per_episode: 1
     domains_per_episode: 4
-    classes_per_domain: 4
+    classes_per_domain: 5
     support_per_class: 3
     query_per_class: 10
     preserve_labels: true

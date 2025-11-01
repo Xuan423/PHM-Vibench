@@ -1,0 +1,15 @@
+__include__:
+  - base.yaml
+
+task:
+  metadata:
+    variant_label: "no_episode_single_branch"
+    variant_type: "episodic"
+    episode_enabled: false
+    support_alignment: true
+    active_branches: "query_query"
+  few_shot:
+    enabled: false
+  contrastive:
+    active_branches:
+      - query_query

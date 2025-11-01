@@ -1,0 +1,14 @@
+__include__:
+  - base.yaml
+
+task:
+  metadata:
+    variant_label: "support_no_align"
+    variant_type: "episodic"
+    episode_enabled: true
+    support_alignment: false
+    active_branches: "support_support,support_query,query_query"
+  contrastive:
+    support_loss:
+      mode: "cross_entropy"
+      prototype_weight: 0.0

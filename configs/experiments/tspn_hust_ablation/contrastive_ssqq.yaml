@@ -1,0 +1,12 @@
+__include__:
+  - base.yaml
+
+task:
+  metadata:
+    variant_label: "contrastive_ssqq"
+    variant_type: "contrastive_branch"
+    active_branches: "support_support,query_query"
+  contrastive:
+    active_branches:
+      - support_support
+      - query_query

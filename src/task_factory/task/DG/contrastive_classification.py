@@ -130,6 +130,12 @@ class task(Default_task):
             getattr(self._explainability_cfg, "enabled", False)
         )
         self._cached_embeddings: Dict[str, list] = {"val": [], "test": []}
+        allowed_branches_cfg = _get(
+            task_cfg,
+            "active_branches",
+            _get(model_cfg, "active_branches", None),
+        )
+        self.allowed_branches = self._parse_active_branches(allowed_branches_cfg)
 
     # ------------------------------------------------------------------
     # Overrides
@@ -139,6 +145,25 @@ class task(Default_task):
         file_id = batch.get("file_id")
         task_id = batch.get("task_id")
         return self.network(x, file_id, task_id, return_embeddings=True)
+
+    def _parse_active_branches(self, branch_config: Any) -> set[str]:
+        default = {"support_support", "support_query", "query_query"}
+        if branch_config is None:
+            return default
+
+        if isinstance(branch_config, (list, tuple, set)):
+            items = list(branch_config)
+        elif isinstance(branch_config, str):
+            items = [part.strip() for part in branch_config.split(",")]
+        else:
+            warnings.warn(
+                f"[contrastive] Unsupported active_branches type ({type(branch_config)}); falling back to default.",
+                RuntimeWarning,
+            )
+            return default
+
+        cleaned = {str(item).strip() for item in items if str(item).strip()}
+        return cleaned
 
     def _shared_step(self, batch: Any, stage: str, task_id=False):
         if isinstance(batch, EpisodeBatch):
@@ -537,44 +562,47 @@ class task(Default_task):
     ) -> Dict[str, ContrastiveBranchStat]:
         branches: Dict[str, ContrastiveBranchStat] = {}
 
-        query_stat = self._contrastive_branch(
-            name="query_query",
-            anchors=query_projection,
-            anchor_labels=query_labels,
-            anchor_domains=query_domains,
-            candidates=query_projection,
-            candidate_labels=query_labels,
-            candidate_domains=query_domains,
-            exclude_self=True,
-        )
-        if query_stat is not None:
-            branches[query_stat.name] = query_stat
-
-        if support_projection is not None and support_labels is not None and support_labels.numel() > 0:
-            support_stat = self._contrastive_branch(
-                name="support_support",
-                anchors=support_projection,
-                anchor_labels=support_labels,
-                anchor_domains=support_domains,
-                candidates=support_projection,
-                candidate_labels=support_labels,
-                candidate_domains=support_domains,
+        if "query_query" in self.allowed_branches:
+            query_stat = self._contrastive_branch(
+                name="query_query",
+                anchors=query_projection,
+                anchor_labels=query_labels,
+                anchor_domains=query_domains,
+                candidates=query_projection,
+                candidate_labels=query_labels,
+                candidate_domains=query_domains,
                 exclude_self=True,
             )
-            if support_stat is not None:
-                branches[support_stat.name] = support_stat
+            if query_stat is not None:
+                branches[query_stat.name] = query_stat
 
-            cross_stat = self._contrastive_cross_branch(
-                name="support_query",
-                support_projection=support_projection,
-                support_labels=support_labels,
-                support_domains=support_domains,
-                query_projection=query_projection,
-                query_labels=query_labels,
-                query_domains=query_domains,
-            )
-            if cross_stat is not None:
-                branches[cross_stat.name] = cross_stat
+        if support_projection is not None and support_labels is not None and support_labels.numel() > 0:
+            if "support_support" in self.allowed_branches:
+                support_stat = self._contrastive_branch(
+                    name="support_support",
+                    anchors=support_projection,
+                    anchor_labels=support_labels,
+                    anchor_domains=support_domains,
+                    candidates=support_projection,
+                    candidate_labels=support_labels,
+                    candidate_domains=support_domains,
+                    exclude_self=True,
+                )
+                if support_stat is not None:
+                    branches[support_stat.name] = support_stat
+
+            if "support_query" in self.allowed_branches:
+                cross_stat = self._contrastive_cross_branch(
+                    name="support_query",
+                    support_projection=support_projection,
+                    support_labels=support_labels,
+                    support_domains=support_domains,
+                    query_projection=query_projection,
+                    query_labels=query_labels,
+                    query_domains=query_domains,
+                )
+                if cross_stat is not None:
+                    branches[cross_stat.name] = cross_stat
 
         return branches
 
