@@ -9,6 +9,7 @@ import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from queue import SimpleQueue
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
@@ -107,6 +108,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Comma separated CUDA device list forwarded as CUDA_VISIBLE_DEVICES.",
     )
     parser.add_argument(
+        "--device-pool",
+        type=str,
+        default=None,
+        help="Optional comma separated list of devices to pin one run per GPU.",
+    )
+    parser.add_argument(
         "--pipeline",
         type=str,
         default="Pipeline_01_default",
@@ -154,11 +161,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     print(f"[INFO] Generated {len(run_specs)} run specifications from {grid_path}")
 
+    device_pool = parse_device_pool(args.device_pool)
+
     results = execute_runs(
         run_specs,
         max_parallel=max(1, args.max_parallel),
         timeout=args.timeout if args.timeout > 0 else None,
         devices=args.devices,
+        device_pool=device_pool,
         pipeline=args.pipeline,
         dry_run=args.dry_run,
     )
@@ -172,6 +182,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 max_parallel=max(1, args.max_parallel),
                 timeout=args.timeout if args.timeout > 0 else None,
                 devices=args.devices,
+                device_pool=device_pool,
                 pipeline=args.pipeline,
                 dry_run=args.dry_run,
             )
@@ -313,25 +324,45 @@ def execute_runs(
     max_parallel: int,
     timeout: Optional[int],
     devices: Optional[str],
+    device_pool: Optional[Sequence[str]],
     pipeline: Optional[str],
     dry_run: bool,
 ) -> List[RunResult]:
     results: List[RunResult] = []
+
+    pool: Optional[SimpleQueue]
+    if device_pool:
+        pool = SimpleQueue()
+        for token in device_pool:
+            pool.put(token)
+    else:
+        pool = None
 
     def run_single(spec: RunSpec) -> RunResult:
         spec.output_dir.mkdir(parents=True, exist_ok=True)
         cache_path = build_override(spec.base_config, spec.overrides, spec.name)
         spec.config_path = cache_path
         log_path = spec.output_dir / "train.log"
-        extra_env = {"CUDA_VISIBLE_DEVICES": devices} if devices else None
-        launch = launch_experiment(
-            cache_path,
-            log_path=log_path,
-            timeout=timeout,
-            extra_env=extra_env,
-            pipeline=pipeline,
-            dry_run=dry_run,
-        )
+        device_token: Optional[str] = None
+        if pool:
+            device_token = pool.get()
+        try:
+            extra_env = None
+            if device_token is not None:
+                extra_env = {"CUDA_VISIBLE_DEVICES": device_token}
+            elif devices:
+                extra_env = {"CUDA_VISIBLE_DEVICES": devices}
+            launch = launch_experiment(
+                cache_path,
+                log_path=log_path,
+                timeout=timeout,
+                extra_env=extra_env,
+                pipeline=pipeline,
+                dry_run=dry_run,
+            )
+        finally:
+            if pool and device_token is not None:
+                pool.put(device_token)
         status = "success"
         if launch.timed_out:
             status = "timeout"
@@ -387,6 +418,13 @@ def execute_runs(
             results.append(result)
             print(f"[INFO] Completed run {spec.name} with status {result.status}")
     return results
+
+
+def parse_device_pool(raw: Optional[str]) -> Optional[Sequence[str]]:
+    if not raw:
+        return None
+    tokens = [token.strip() for token in raw.split(",") if token.strip()]
+    return tokens or None
 
 
 def locate_lightning_log(project_name: Optional[str], retries: int = 5, delay: int = 3) -> Optional[Path]:
