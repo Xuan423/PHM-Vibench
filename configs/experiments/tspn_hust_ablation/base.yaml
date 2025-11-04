@@ -26,3 +26,5 @@ task:
       - support_support
       - support_query
       - query_query
+    weighting:
+      strategy: "uniform"

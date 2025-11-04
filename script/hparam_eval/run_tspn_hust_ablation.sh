@@ -47,4 +47,18 @@ if [[ -n "${HUST_ABLATION_NOTES:-}" ]]; then
   ARGS+=("--notes" "${HUST_ABLATION_NOTES}")
 fi
 
-exec "${PYTHON_BIN}" -m script.hparam_eval.tspn_hust_ablation "${ARGS[@]}" "$@"
+"${PYTHON_BIN}" -m script.hparam_eval.tspn_hust_ablation "${ARGS[@]}" "$@"
+
+STATS_ARGS=("--input" "${OUTPUT_ROOT}")
+if [[ -n "${HUST_ABLATION_STATS_METRIC_COLUMN:-}" ]]; then
+  STATS_ARGS+=("--metric-column" "${HUST_ABLATION_STATS_METRIC_COLUMN}")
+elif [[ -n "${HUST_ABLATION_STATS_METRIC_PATTERN:-}" ]]; then
+  STATS_ARGS+=("--metric-pattern" "${HUST_ABLATION_STATS_METRIC_PATTERN}")
+fi
+
+if [[ -n "${HUST_ABLATION_STATS_OUTPUT_DIR:-}" ]]; then
+  STATS_ARGS+=("--output-dir" "${HUST_ABLATION_STATS_OUTPUT_DIR}")
+fi
+
+echo "[INFO] Generating accuracy statistics..."
+"${PYTHON_BIN}" -m script.hparam_eval.tspn_hust_ablation_stats "${STATS_ARGS[@]}"

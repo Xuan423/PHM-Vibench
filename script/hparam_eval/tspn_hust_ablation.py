@@ -66,6 +66,21 @@ VARIANT_REGISTRY: List[Variant] = [
     Variant("baseline_tspn", "baseline_tspn.yaml", "Baseline TSPN without contrastive or episodic sampling."),
 ]
 
+CONTRASTIVE_WEIGHTED_VARIANTS = {
+    "contrastive_full",
+    "contrastive_ssqq",
+    "contrastive_qs_only",
+    "no_episode_single_branch",
+    "support_no_align",
+}
+
+CONTRASTIVE_LOSS_WEIGHTS: Sequence[float] = (0.2, 0.3)
+
+SOURCE_DOMAIN_COMBINATIONS: Dict[str, List[int]] = {
+    "even": [0, 2, 4, 6, 8],
+    "odd": [1, 3, 5, 7, 9],
+}
+
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -193,30 +208,53 @@ def build_run_specs(
         if not config_path.exists():
             raise FileNotFoundError(f"Variant config not found: {config_path}")
 
-        run_output = output_root / variant.name
-        overrides = {
-            "environment.project": f"hust_ablation_{variant.name}",
-            "environment.output_dir": str(run_output),
-            "environment.notes": _collapse_notes(variant.description, global_notes),
-            "task.metadata.run_name": variant.name,
-        }
+        weight_options: Sequence[Optional[float]]
+        if variant.name in CONTRASTIVE_WEIGHTED_VARIANTS:
+            weight_options = tuple(CONTRASTIVE_LOSS_WEIGHTS)
+        else:
+            weight_options = (None,)
 
-        cached_config_path = build_override(config_path, overrides, variant.name)
-        metadata = _extract_metadata(cached_config_path)
-        metadata.setdefault("variant_label", variant.name)
+        for weight in weight_options:
+            for domain_tag, domain_ids in SOURCE_DOMAIN_COMBINATIONS.items():
+                run_name = _compose_run_name(variant.name, weight, domain_tag)
+                run_output = output_root / run_name
+                overrides: Dict[str, Any] = {
+                    "environment.project": f"hust_ablation_{run_name}",
+                    "environment.output_dir": str(run_output),
+                    "environment.notes": _collapse_notes(variant.description, global_notes),
+                    "task.metadata.run_name": run_name,
+                    "task.metadata.base_variant": variant.name,
+                    "task.metadata.source_domain_tag": domain_tag,
+                    "task.metadata.source_domain_ids": ",".join(str(i) for i in domain_ids),
+                    "task.source_domain_id": domain_ids,
+                }
 
-        specs.append(
-            RunSpec(
-                name=variant.name,
-                variant=variant,
-                base_config=config_path,
-                overrides=overrides,
-                output_dir=run_output,
-                metadata=metadata,
-                pipeline=pipeline,
-                config_path=cached_config_path,
-            )
-        )
+                if weight is not None:
+                    overrides["task.metadata.contrastive_loss_weight"] = weight
+                    overrides["task.contrastive.loss_weight"] = weight
+                    overrides["model.contrastive.loss_weight"] = weight
+
+                cached_config_path = build_override(config_path, overrides, run_name)
+                metadata = _extract_metadata(cached_config_path)
+                metadata.setdefault("variant_label", variant.name)
+                metadata.setdefault("base_variant", variant.name)
+                if weight is not None:
+                    metadata.setdefault("contrastive_loss_weight", weight)
+                metadata.setdefault("source_domain_tag", domain_tag)
+                metadata.setdefault("source_domain_ids", ",".join(str(i) for i in domain_ids))
+
+                specs.append(
+                    RunSpec(
+                        name=run_name,
+                        variant=variant,
+                        base_config=config_path,
+                        overrides=overrides,
+                        output_dir=run_output,
+                        metadata=metadata,
+                        pipeline=pipeline,
+                        config_path=cached_config_path,
+                    )
+                )
     return specs
 
 
@@ -370,6 +408,15 @@ def summarise_results(results: Sequence[RunResult], output_root: Path) -> None:
         body = "\n".join(" | ".join(map(str, row)) for row in df.to_numpy())
         markdown = "\n".join([header, separator, body])
     summary_md.write_text(markdown, encoding="utf-8")
+
+
+def _compose_run_name(variant_name: str, weight: Optional[float], domain_tag: str) -> str:
+    parts = [variant_name]
+    if weight is not None:
+        weight_str = str(weight).replace(".", "p")
+        parts.append(f"lw{weight_str}")
+    parts.append(f"src_{domain_tag}")
+    return "__".join(parts)
 
 
 def _collapse_notes(*notes: str) -> str:

@@ -66,6 +66,9 @@ script/hparam_eval/run_tspn_hust_ablation.sh --max-parallel 2
 | `HUST_ABLATION_PIPELINE` | 转发给 `--pipeline`                            |
 | `HUST_ABLATION_TIMEOUT`  | 转发给 `--timeout`                             |
 | `HUST_ABLATION_NOTES`    | 附加备注，写入 `environment.notes`             |
+| `HUST_ABLATION_STATS_METRIC_COLUMN` | 指定统计脚本的精度列名（可选）      |
+| `HUST_ABLATION_STATS_METRIC_PATTERN` | 指定统计脚本的精度列匹配模式        |
+| `HUST_ABLATION_STATS_OUTPUT_DIR` | 将统计结果写入的目录（默认同 OUTPUT_ROOT） |
 
 ## 产出
 
@@ -81,6 +84,31 @@ script/hparam_eval/run_tspn_hust_ablation.sh --max-parallel 2
 - `variant`、`status`、`runtime_sec`
 - `meta_*` 字段（来自 `task.metadata`）
 - 所有以 `test` 开头的指标（如 `test_acc_HUST`）
+
+### 精度统计脚本
+
+完成一轮实验后，可运行补充脚本快速整理精度指标：
+
+```bash
+python -m script.hparam_eval.tspn_hust_ablation_stats --input save/hust_ablation
+```
+
+默认读取 `save/hust_ablation/ablation_summary.csv`，自动识别包含 `test_acc` 的列作为精度字段（可通过 `--metric-column` 指定其他列名），并导出：
+
+- `accuracy_records.csv`：逐次实验的精度记录及关键元信息。
+- `accuracy_summary.csv`：按 `variant`、`contrastive_loss_weight`、`source_domain_tag` 等分组的精度统计（均值、标准差、最优 run 等）。
+
+若将输出写到其他目录，可使用 `--output-dir <path>` 进行覆盖。
+
+也可以直接通过 shell 脚本在同一次调用中完成实验与统计。例如：
+
+```bash
+HUST_ABLATION_DEVICE_POOL="0,1" \
+HUST_ABLATION_STATS_OUTPUT_DIR="save/hust_ablation/stats" \
+script/hparam_eval/run_tspn_hust_ablation.sh --max-parallel 2
+```
+
+上述命令会运行所有 ablation 变体，并在结束后生成精度报表。
 
 ## 扩展建议
 
