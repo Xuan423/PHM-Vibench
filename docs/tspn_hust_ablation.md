@@ -1,6 +1,6 @@
 # TSPN HUST Ablation Suite
 
-本说明涵盖如何运行并扩展 `configs/experiments/tspn_hust_ablation/` 所提供的消融实验。该套件基于 `configs/demo/X_Single_DG/TSPN_FewShot/contrastive.yaml`（迭代次数已统一设置为 5），用于评估对比损失分支、episode 采样策略以及无对比 baseline 的贡献。
+本说明涵盖如何运行并扩展 `configs/experiments/tspn_hust_ablation/` 所提供的消融实验。若需同时运行 HUST 与 SDUST 的统一消融流程，请参考《docs/tspn_contrastive_ablation.md》。该套件基于 `configs/demo/X_Single_DG/TSPN_FewShot/contrastive.yaml`（迭代次数已统一设置为 5），用于评估对比损失分支、episode 采样策略以及无对比 baseline 的贡献。
 
 ## 目录结构
 

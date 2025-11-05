@@ -1,0 +1,31 @@
+__include__:
+  - base.yaml
+
+model:
+  contrastive:
+    enabled: false
+
+task:
+  metadata:
+    variant_label: "baseline_tspn"
+    variant_type: "baseline"
+    episode_enabled: "false"
+    support_alignment: "disabled"
+  few_shot:
+    enabled: false
+  contrastive:
+    loss_weight: 0.0
+    normalize_embeddings: false
+    branches:
+      support_support:
+        enabled: false
+        participates: false
+      support_query:
+        enabled: false
+        participates: false
+      query_query:
+        enabled: false
+        participates: false
+    support_loss:
+      mode: "none"
+      loss_weight: 0.0

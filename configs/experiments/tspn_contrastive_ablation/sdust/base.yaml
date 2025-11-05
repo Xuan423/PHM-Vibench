@@ -1,0 +1,28 @@
+# Base configuration for SDUST contrastive ablation variants.
+
+__include__:
+  - ../base.yaml
+
+environment:
+  project: "tspn_contrastive_ablation_sdust"
+  output_dir: "results/tspn_contrastive_ablation_sdust"
+  notes: "SDUST contrastive ablation baseline."
+
+task:
+  metadata:
+    dataset: "SDUST"
+    target_system_id: "[21]"
+  target_domain_id: [40]
+  source_domain_id: [3, 7, 12, 16, 20, 24]
+  few_shot:
+    enabled: true
+    sampler: "hierarchical"
+    systems_per_episode: 1
+    domains_per_episode: 4
+    classes_per_domain: 8
+    support_per_class: 3
+    query_per_class: 10
+    preserve_labels: true
+    episodes_per_epoch: 10
+    warn_on_shortfall: true
+    format: "episode"

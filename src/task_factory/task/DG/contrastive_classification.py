@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from pathlib import Path
 import warnings
 
@@ -14,6 +14,8 @@ from ...Default_task import Default_task
 from ....data_factory.batch import EpisodeBatch, EpisodeLabelView
 from ....utils.explainability import export_tspn_explainability
 
+CANONICAL_BRANCHES: Tuple[str, ...] = ("support_support", "support_query", "query_query")
+
 
 @dataclass
 class ContrastiveBranchStat:
@@ -22,6 +24,12 @@ class ContrastiveBranchStat:
     positive_count: torch.Tensor
     anchor_count: torch.Tensor
     weight: Optional[torch.Tensor] = None
+
+
+@dataclass
+class BranchSpec:
+    enabled: bool = True
+    participates: bool = True
 
 
 class task(Default_task):
@@ -130,12 +138,28 @@ class task(Default_task):
             getattr(self._explainability_cfg, "enabled", False)
         )
         self._cached_embeddings: Dict[str, list] = {"val": [], "test": []}
-        allowed_branches_cfg = _get(
+        branches_cfg = _get(
             task_cfg,
-            "active_branches",
-            _get(model_cfg, "active_branches", None),
+            "branches",
+            _get(model_cfg, "branches", None),
         )
-        self.allowed_branches = self._parse_active_branches(allowed_branches_cfg)
+        if branches_cfg is not None:
+            self.branch_specs = self._parse_branch_specs(branches_cfg)
+        else:
+            allowed_branches_cfg = _get(
+                task_cfg,
+                "active_branches",
+                _get(model_cfg, "active_branches", None),
+            )
+            allowed = self._parse_active_branches(allowed_branches_cfg)
+            self.branch_specs = {
+                name: BranchSpec(enabled=name in allowed, participates=name in allowed)
+                for name in CANONICAL_BRANCHES
+            }
+        self.allowed_branches = {name for name, spec in self.branch_specs.items() if spec.enabled}
+        self.branch_participation = {
+            name: spec.participates for name, spec in self.branch_specs.items()
+        }
 
     # ------------------------------------------------------------------
     # Overrides
@@ -147,7 +171,7 @@ class task(Default_task):
         return self.network(x, file_id, task_id, return_embeddings=True)
 
     def _parse_active_branches(self, branch_config: Any) -> set[str]:
-        default = {"support_support", "support_query", "query_query"}
+        default = set(CANONICAL_BRANCHES)
         if branch_config is None:
             return default
 
@@ -163,7 +187,53 @@ class task(Default_task):
             return default
 
         cleaned = {str(item).strip() for item in items if str(item).strip()}
-        return cleaned
+        canonical = {name for name in cleaned if name in default}
+        if len(canonical) < len(cleaned):
+            warnings.warn(
+                "[contrastive] Ignoring unknown branches in active_branches configuration.",
+                RuntimeWarning,
+            )
+        return canonical or default
+
+    def _parse_branch_specs(self, branch_config: Any) -> Dict[str, BranchSpec]:
+        specs: Dict[str, BranchSpec] = {name: BranchSpec() for name in CANONICAL_BRANCHES}
+        if isinstance(branch_config, Mapping):
+            for raw_name, raw_cfg in branch_config.items():
+                name = str(raw_name).strip()
+                if name not in specs:
+                    warnings.warn(
+                        f"[contrastive] Unknown branch '{name}' in branches configuration; skipping.",
+                        RuntimeWarning,
+                    )
+                    continue
+                if isinstance(raw_cfg, Mapping):
+                    enabled = bool(raw_cfg.get("enabled", True))
+                    participates = bool(raw_cfg.get("participates", enabled))
+                elif isinstance(raw_cfg, bool):
+                    enabled = bool(raw_cfg)
+                    participates = enabled
+                else:
+                    warnings.warn(
+                        f"[contrastive] Unsupported branch specification type for '{name}'; using defaults.",
+                        RuntimeWarning,
+                    )
+                    enabled = True
+                    participates = True
+                specs[name] = BranchSpec(enabled=enabled, participates=participates)
+            return specs
+
+        if isinstance(branch_config, (list, tuple, set)) or isinstance(branch_config, str):
+            active = self._parse_active_branches(branch_config)
+            return {
+                name: BranchSpec(enabled=name in active, participates=name in active)
+                for name in CANONICAL_BRANCHES
+            }
+
+        warnings.warn(
+            f"[contrastive] Unsupported branches configuration type ({type(branch_config)}); using defaults.",
+            RuntimeWarning,
+        )
+        return specs
 
     def _shared_step(self, batch: Any, stage: str, task_id=False):
         if isinstance(batch, EpisodeBatch):
@@ -243,6 +313,14 @@ class task(Default_task):
             weight = branch_weights.get(name)
             if weight is not None:
                 step_metrics[f"{stage}_contrastive_{name}_weight"] = weight
+            participates_flag = 1.0 if self.branch_participation.get(name, True) else 0.0
+            step_metrics[f"{stage}_contrastive_{name}_participates"] = torch.as_tensor(
+                participates_flag, device=stat.loss.device, dtype=stat.loss.dtype
+            )
+            participates_flag = 1.0 if self.branch_participation.get(name, True) else 0.0
+            step_metrics[f"{stage}_contrastive_{name}_participates"] = torch.as_tensor(
+                participates_flag, device=stat.loss.device, dtype=stat.loss.dtype
+            )
 
         if contrastive_loss is not None:
             step_metrics[f"{stage}_contrastive_loss"] = contrastive_loss
@@ -417,6 +495,10 @@ class task(Default_task):
             weight = branch_weights.get(name)
             if weight is not None:
                 step_metrics[f"{stage}_contrastive_{name}_weight"] = weight
+            participates_flag = 1.0 if self.branch_participation.get(name, True) else 0.0
+            step_metrics[f"{stage}_contrastive_{name}_participates"] = torch.as_tensor(
+                participates_flag, device=stat.loss.device, dtype=stat.loss.dtype
+            )
 
         if contrastive_loss is not None:
             step_metrics[f"{stage}_contrastive_loss"] = contrastive_loss
@@ -758,11 +840,16 @@ class task(Default_task):
                 branches[name].weight = weight
             return None, branch_weights
 
-        weighted_losses = []
+        participation = getattr(self, "branch_participation", {})
+        weighted_losses: List[torch.Tensor] = []
         for name, stat in branches.items():
             weight = branch_weights.get(name, torch.tensor(0.0, device=device, dtype=dtype))
             stat.weight = weight
-            weighted_losses.append(stat.loss * weight)
+            participates = participation.get(name, True)
+            if participates:
+                weighted_losses.append(stat.loss * weight)
+            else:
+                weighted_losses.append(stat.loss * 0.0)
 
         combined_loss = torch.stack(weighted_losses).sum()
         return combined_loss, branch_weights
