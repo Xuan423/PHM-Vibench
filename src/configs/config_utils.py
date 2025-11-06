@@ -281,11 +281,19 @@ def build_experiment_name(configs) -> str:
     dataset_name = configs.data.metadata_file
     model_name = configs.model.name
     task_name = f"{configs.task.type}{configs.task.name}"
-    timestamp = datetime.now().strftime("%d_%H%M%S")
+    metadata = getattr(configs.task, "metadata", None)
+    run_name = getattr(metadata, "run_name", None) if metadata else None
+    timestamp = datetime.now().strftime("%d_%H%M%S_%f")
     if model_name == "ISFM":
         model_cfg = configs.model
         model_name = f"ISFM_{model_cfg.embedding}_{model_cfg.backbone}_{model_cfg.task_head}"
-    return f"{dataset_name}/M_{model_name}/T_{task_name}_{timestamp}"
+
+    components = [dataset_name, f"M_{model_name}", f"T_{task_name}"]
+    if run_name:
+        safe_run_name = str(run_name).replace("/", "_").replace("\\", "_").replace(" ", "_")
+        components.append(f"R_{safe_run_name}")
+    base_name = "/".join(components)
+    return f"{base_name}_{timestamp}"
 
 
 def path_name(configs, iteration: int = 0) -> Tuple[str, str]:
