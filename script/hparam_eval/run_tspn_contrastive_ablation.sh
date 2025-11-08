@@ -52,7 +52,15 @@ if [[ -n "${CONTRASTIVE_ABLATION_NOTES:-}" ]]; then
   ARGS+=("--notes" "${CONTRASTIVE_ABLATION_NOTES}")
 fi
 
-"${PYTHON_BIN}" -m script.hparam_eval.tspn_contrastive_ablation "${ARGS[@]}" "$@"
+if [[ -n "${CONTRASTIVE_ABLATION_RESUME_FAILED:-}" ]]; then
+  case "${CONTRASTIVE_ABLATION_RESUME_FAILED}" in
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On)
+      ARGS+=("--resume-failed")
+      ;;
+  esac
+fi
+
+taskset -c 0-15 "${PYTHON_BIN}" -m script.hparam_eval.tspn_contrastive_ablation "${ARGS[@]}" "$@"
 
 STATS_ARGS=("--input" "${OUTPUT_ROOT}")
 if [[ -n "${CONTRASTIVE_ABLATION_STATS_METRIC_COLUMN:-}" ]]; then

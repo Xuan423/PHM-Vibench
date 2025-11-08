@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 from queue import SimpleQueue
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import pandas as pd
 import yaml
@@ -127,6 +128,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default="",
         help="Additional notes appended to environment.notes for each run.",
     )
+    parser.add_argument(
+        "--resume-failed",
+        action="store_true",
+        help="Run only specifications whose previous run_summary does not report success.",
+    )
     return parser.parse_args(argv)
 
 
@@ -148,6 +154,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         pipeline=args.pipeline,
         global_notes=args.notes,
     )
+
+    if args.resume_failed:
+        run_specs, skipped = _filter_failed_specs(run_specs)
+        print(f"[INFO] Resume mode active: skipped {skipped} completed runs.")
+        if not run_specs:
+            print("[INFO] No failed or pending runs remain; exiting.")
+            return 0
 
     if not run_specs:
         print("[WARN] No run specifications generated; aborting.")
@@ -532,6 +545,32 @@ def _extract_accuracy_metrics(summary: Mapping[str, Any]) -> Dict[str, Any]:
         if fallback in summary and fallback not in metrics:
             metrics[fallback] = summary[fallback]
     return metrics
+
+
+def _load_run_status(output_dir: Path) -> Optional[str]:
+    summary_path = output_dir / "run_summary.json"
+    if not summary_path.exists():
+        return None
+    try:
+        data = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    status = data.get("status")
+    if isinstance(status, str):
+        return status
+    return None
+
+
+def _filter_failed_specs(run_specs: Sequence[RunSpec]) -> Tuple[List[RunSpec], int]:
+    filtered: List[RunSpec] = []
+    skipped = 0
+    for spec in run_specs:
+        status = _load_run_status(spec.output_dir)
+        if status and status.lower() == "success":
+            skipped += 1
+            continue
+        filtered.append(spec)
+    return filtered, skipped
 
 
 if __name__ == "__main__":

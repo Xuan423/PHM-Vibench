@@ -77,6 +77,9 @@ CONTRASTIVE_ABLATION_VARIANTS="contrastive_full contrastive_qs_only" \
 script/hparam_eval/run_tspn_contrastive_ablation.sh --max-parallel 2
 ```
 
+CONTRASTIVE_ABLATION_DEVICE_POOL=1 CONTRASTIVE_ABLATION_RESUME_FAILED=1 bash script/hparam_eval/run_tspn_contrastive_ablation.sh --max-parallel 1
+CONTRASTIVE_ABLATION_DEVICE_POOL=0,1 CONTRASTIVE_ABLATION_RESUME_FAILED=1 bash script/hparam_eval/run_tspn_contrastive_ablation.sh --max-parallel 2
+
 Environment variables:
 
 - `CONTRASTIVE_ABLATION_DATASETS` – whitespace separated dataset list

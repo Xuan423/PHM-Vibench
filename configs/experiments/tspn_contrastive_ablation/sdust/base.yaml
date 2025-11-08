@@ -8,6 +8,10 @@ environment:
   output_dir: "results/tspn_contrastive_ablation_sdust"
   notes: "SDUST contrastive ablation baseline."
 
+model:
+  num_classes: 10
+  in_channels : 6
+  
 task:
   metadata:
     dataset: "SDUST"
