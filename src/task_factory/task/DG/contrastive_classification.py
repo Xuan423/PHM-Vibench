@@ -435,6 +435,7 @@ class task(Default_task):
 
         if (
             support_count > 0
+            and batch.is_first_chunk
             and self.support_loss_weight > 0
             and self.support_loss_mode in {"cross_entropy", "prototype", "hybrid"}
         ):

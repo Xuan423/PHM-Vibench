@@ -61,17 +61,3 @@ if [[ -n "${CONTRASTIVE_ABLATION_RESUME_FAILED:-}" ]]; then
 fi
 
 taskset -c 0-15 "${PYTHON_BIN}" -m script.hparam_eval.tspn_contrastive_ablation "${ARGS[@]}" "$@"
-
-STATS_ARGS=("--input" "${OUTPUT_ROOT}")
-if [[ -n "${CONTRASTIVE_ABLATION_STATS_METRIC_COLUMN:-}" ]]; then
-  STATS_ARGS+=("--metric-column" "${CONTRASTIVE_ABLATION_STATS_METRIC_COLUMN}")
-elif [[ -n "${CONTRASTIVE_ABLATION_STATS_METRIC_PATTERN:-}" ]]; then
-  STATS_ARGS+=("--metric-pattern" "${CONTRASTIVE_ABLATION_STATS_METRIC_PATTERN}")
-fi
-
-if [[ -n "${CONTRASTIVE_ABLATION_STATS_OUTPUT_DIR:-}" ]]; then
-  STATS_ARGS+=("--output-dir" "${CONTRASTIVE_ABLATION_STATS_OUTPUT_DIR}")
-fi
-
-echo "[INFO] Generating accuracy statistics..."
-"${PYTHON_BIN}" -m script.hparam_eval.tspn_contrastive_ablation_stats "${STATS_ARGS[@]}"

@@ -1,6 +1,6 @@
 # Unified TSPN Contrastive Ablation Guide
 
-This document describes the new ablation workflow that extends the original HUST-only scripts to cover both HUST and SDUST datasets with consistent branch-weight handling and reliable accuracy reporting.
+This document describes the unified ablation workflow that extends the original HUST-only scripts to cover both HUST and SDUST datasets with consistent branch-weight handling, episodic batch chunking, and consolidated accuracy reporting via `tspn_resummarise.py`.
 
 ## Overview
 
@@ -10,6 +10,7 @@ This document describes the new ablation workflow that extends the original HUST
   - `hust/`: inherits demo few-shot hyperparameters
   - `sdust/`: applies SDUST-specific few-shot overrides
 - Branch toggles are controlled via `task.contrastive.branches` using `enabled` / `participates` fields. Disabling a branch now keeps the three-way weighting intact while zeroing the contribution in the total loss.
+- `task.batch_size` is the single source of truth for episodic batching; it caps the number of query samples per Lightning iteration while each chunk continues to include the full support set.
 
 ## Dataset Recipes
 
@@ -42,6 +43,8 @@ This document describes the new ablation workflow that extends the original HUST
 |---------|-------------|----------------------|
 | `contrastive_full` | All branches active (default `base.yaml`) | `support_support`, `support_query`, `query_query` participate |
 | `contrastive_ssqq` | Support-query branch excluded from total loss | Branch remains enabled but `participates=false` |
+| `contrastive_ss_only` | Only support-support branch contributes | `support_query` / `query_query` disabled |
+| `contrastive_qq_only` | Only query-query branch contributes | `support_support` / `support_query` disabled |
 | `contrastive_qs_only` | Only support-query contributes | `support_support` / `query_query` set to `participates=false` |
 | `support_no_align` | Support prototype alignment & CE disabled | Support loss weight = 0; all branches participate |
 | `contrastive_disabled` | Contrastive objective fully disabled | Branches disabled; loss weight fixed to 0 |
@@ -77,15 +80,12 @@ CONTRASTIVE_ABLATION_VARIANTS="contrastive_full contrastive_qs_only" \
 script/hparam_eval/run_tspn_contrastive_ablation.sh --max-parallel 2
 ```
 
-CONTRASTIVE_ABLATION_DEVICE_POOL=1 CONTRASTIVE_ABLATION_RESUME_FAILED=1 bash script/hparam_eval/run_tspn_contrastive_ablation.sh --max-parallel 1
-CONTRASTIVE_ABLATION_DEVICE_POOL=0,1 CONTRASTIVE_ABLATION_RESUME_FAILED=1 bash script/hparam_eval/run_tspn_contrastive_ablation.sh --max-parallel 2
-
 Environment variables:
 
 - `CONTRASTIVE_ABLATION_DATASETS` – whitespace separated dataset list
 - `CONTRASTIVE_ABLATION_VARIANTS` – optional variant list
 - `CONTRASTIVE_ABLATION_DEVICES`, `CONTRASTIVE_ABLATION_DEVICE_POOL` – GPU bindings
-- `CONTRASTIVE_ABLATION_STATS_METRIC_PATTERN` – override accuracy column detection for the stats step
+- `CONTRASTIVE_ABLATION_TIMEOUT`, `CONTRASTIVE_ABLATION_PIPELINE`, `CONTRASTIVE_ABLATION_NOTES` mirror CLI flags
 
 ## Outputs
 
@@ -95,7 +95,6 @@ Structure under `save/contrastive_ablation/`:
 - `<dataset>/<run_name>/run_summary.json`
 - `<dataset>/<run_name>/resolved_config.yaml`
 - `ablation_summary.csv` / `ablation_summary.md` (dataset column distinguishes runs)
-- Statistics step produces `accuracy_records.csv` and `accuracy_summary.csv`
 
 `ablation_summary.csv` now contains:
 
@@ -105,17 +104,16 @@ Structure under `save/contrastive_ablation/`:
 
 ## Accuracy Aggregation
 
-After the shell wrapper completes, the helper script
+Use the shared summariser to consolidate historical runs without relaunching experiments:
 
 ```bash
-python -m script.hparam_eval.tspn_contrastive_ablation_stats --input save/contrastive_ablation
+python script/hparam_eval/tspn_resummarise.py \
+  --root save/contrastive_ablation \
+  --output save/contrastive_ablation/tspn_resummary.csv \
+  --markdown save/contrastive_ablation/tspn_resummary.md
 ```
 
-will:
-
-1. Identify an accuracy column (via `--metric-column` or pattern match).
-2. Write per-run records (`accuracy_records.csv`) including dataset, domain label, and branch participation.
-3. Produce grouped statistics (`accuracy_summary.csv`) keyed by dataset, variant, loss weight, and branch participation label.
+`tspn_resummarise.py` scans every `iter_*` directory, records the effective `test_acc*` metric for each iteration, and preserves the hyperparameter columns (`loss_weight`, episodic sampler settings, seed) needed to compare the new ss-only / qq-only ablations with the baseline variants.
 
 ## Migration Notes
 

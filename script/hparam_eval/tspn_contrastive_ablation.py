@@ -55,6 +55,8 @@ class RunResult:
 VARIANT_REGISTRY: List[Variant] = [
     Variant("contrastive_full", "base.yaml", "All contrastive branches active with episodic sampling.", True),
     Variant("contrastive_ssqq", "contrastive_ssqq.yaml", "Disable support-query branch; keep support/query self branches.", True),
+    Variant("contrastive_ss_only", "contrastive_ss_only.yaml", "Only support-support branch participates.", True),
+    Variant("contrastive_qq_only", "contrastive_qq_only.yaml", "Only query-query branch participates.", True),
     Variant("contrastive_qs_only", "contrastive_qs.yaml", "Keep only the support-query contrastive branch.", True),
     Variant("support_no_align", "support_no_align.yaml", "Disable support prototype alignment and CE support loss.", True),
     Variant("contrastive_disabled", "contrastive_disabled.yaml", "Remove contrastive loss from optimisation.", False),

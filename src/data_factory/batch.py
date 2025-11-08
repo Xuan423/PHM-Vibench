@@ -41,6 +41,17 @@ class EpisodeBatch:
     label_views: List[EpisodeLabelView]
     layout: EpisodeLayout
     flat_batch: Dict[str, Any] = field(default_factory=dict)
+    episode_id: Optional[str] = None
+    chunk_index: int = 0
+    chunk_count: int = 1
+
+    @property
+    def is_first_chunk(self) -> bool:
+        return self.chunk_index == 0
+
+    @property
+    def is_last_chunk(self) -> bool:
+        return self.chunk_index >= max(self.chunk_count - 1, 0)
 
 
 class EpisodeCollate:
@@ -146,6 +157,9 @@ class EpisodeCollate:
             label_views=label_views,
             layout=layout,
             flat_batch=flat_batch,
+            episode_id=getattr(layout, "episode_id", None),
+            chunk_index=getattr(layout, "chunk_index", 0),
+            chunk_count=getattr(layout, "chunk_count", 1),
         )
 
     # ------------------------------------------------------------------

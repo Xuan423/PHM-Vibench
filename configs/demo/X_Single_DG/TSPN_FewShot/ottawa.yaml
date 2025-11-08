@@ -29,7 +29,7 @@ task:
   target_system_id: [13]
   target_domain_id: [2,3]
   source_domain_id: [0,1]
-  batch_size: *bs
+  batch_size: *bs  # Per-iteration query cap for episodic batching
   epochs: &num_epoch 100
   lr: 0.002
   es_patience: &es_patience 50

@@ -1,0 +1,18 @@
+__include__:
+  - base.yaml
+
+task:
+  metadata:
+    variant_label: "contrastive_ss_only"
+    variant_type: "branch_mask"
+  contrastive:
+    branches:
+      support_support:
+        enabled: true
+        participates: true
+      support_query:
+        enabled: false
+        participates: false
+      query_query:
+        enabled: false
+        participates: false

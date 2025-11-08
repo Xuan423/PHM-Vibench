@@ -10,7 +10,7 @@ environment:
 data:
   data_dir: "/home/lab617/xuanli/dataset/PHMbench_rawdata"
   metadata_file: "metadata_9_29.xlsx"
-  batch_size: 64
+  batch_size: &tspn_shared_bs 64
   num_workers: 4
   train_ratio: 0.8
   normalization: 'standardization'
@@ -59,7 +59,7 @@ task:
   target_system_id: [19]
   optimizer: "adam"
   regularization: {'flag': True, 'method': {'l1': 0.0001}}
-  batch_size: 64
+  batch_size: *tspn_shared_bs
   num_workers: 4
   pin_memory: true
   shuffle: true

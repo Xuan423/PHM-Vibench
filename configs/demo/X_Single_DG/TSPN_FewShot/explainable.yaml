@@ -15,7 +15,7 @@ environment:
 data:
   data_dir: "/mnt/e/dataset/PHMbench-raw_data"
   metadata_file: "metadata_6_1.xlsx"
-  batch_size: 32
+  batch_size: &tspn_fs_bs 32  # Shared TSPN batch size anchor (used for episodic chunking)
   num_workers: 8
   train_ratio: 0.75
   normalization: 'standardization'
@@ -82,7 +82,7 @@ task:
   optimizer: "adam"
   regularization: {'flag': True, 'method': {'l1': 0.0001}}
 
-  batch_size: 32
+  batch_size: *tspn_fs_bs
   num_workers: 8
   pin_memory: true
   shuffle: true

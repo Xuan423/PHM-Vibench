@@ -10,6 +10,8 @@
 
 所有实验基于 `configs/demo/X_Single_DG/TSPN_FewShot/contrastive.yaml` 导入的默认配置，确保搜索结果可直接与官方 Demo 对齐。
 
+> **Batch size note**: 所有 TSPN YAML 仅保留一个 `batch_size` 锚点（定义在 `data.batch_size`），`task.batch_size` 等字段全部引用该锚点。该数值决定“每次 Lightning iteration 允许的 query 样本数量”，support 集合会在每个 chunk 中完整参与计算。
+
 ## 1. 环境准备
 
 1. 激活项目虚拟环境并安装依赖：
@@ -51,9 +53,9 @@ script/hparam_eval/run_tspn_hparam_resume.sh --max-parallel 2 --device-pool 0,1
 
 ```bash
 python script/hparam_eval/tspn_resummarise.py \
-    --root save/metadata_9_29.xlsx/M_TSPNContrastive \
-    --output save/metadata_9_29.xlsx/tspn_resummary.csv \
-    --markdown save/metadata_9_29.xlsx/tspn_resummary.md
+    --root save/hparam_eval \
+    --output save/hparam_eval/tspn_resummary.csv \
+    --markdown save/hparam_eval/tspn_resummary.md
 ```
 
 该工具会为每个 `iter_*` 目录提取：

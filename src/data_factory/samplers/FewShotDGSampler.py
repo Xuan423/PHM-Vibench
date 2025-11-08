@@ -7,11 +7,17 @@ import multiprocessing as mp
 import warnings
 from collections import defaultdict
 from dataclasses import dataclass
-from queue import Empty
+from queue import Empty, Queue
 from typing import Dict, Iterator, List, Optional, Tuple
 from torch.utils.data import Sampler
 
 from ..dataset_task.Dataset_cluster import IdIncludedDataset
+
+
+@dataclass
+class EpisodeChunkSpec:
+    indices: List[int]
+    layout: EpisodeLayout
 
 
 @dataclass
@@ -31,6 +37,9 @@ class EpisodeLayout:
     requested_support: int
     requested_query: int
     labels: List[EpisodeLabelLayout]
+    episode_id: Optional[str] = None
+    chunk_index: int = 0
+    chunk_count: int = 1
 
 
 class FewShotDGSampler(Sampler[List[int]]):
@@ -50,6 +59,7 @@ class FewShotDGSampler(Sampler[List[int]]):
         *,
         mode: str = "train",
         default_seed: int = 0,
+        iteration_batch_size: Optional[int] = None,
     ) -> None:
         if not isinstance(dataset, IdIncludedDataset):
             raise ValueError("FewShotDGSampler expects an IdIncludedDataset instance")
@@ -61,6 +71,7 @@ class FewShotDGSampler(Sampler[List[int]]):
         self.dataset = dataset
         self.mode = mode
         self.cfg = few_shot_cfg
+        self.iteration_batch_size = max(int(iteration_batch_size or 0), 0)
 
         self.system_key = getattr(few_shot_cfg, "system_key", "Dataset_id")
         self.domain_key = getattr(few_shot_cfg, "domain_key", "Domain_id")
@@ -130,13 +141,34 @@ class FewShotDGSampler(Sampler[List[int]]):
         # Determine global fallback counts for support/query if needed.
         self._effective_support, self._effective_query = self._compute_effective_shots(requested_total)
         self._warned_labels: set[str] = set()
-        start_method = mp.get_start_method(allow_none=True) or "spawn"
-        ctx = mp.get_context(start_method)
-        self._layout_queue = ctx.Queue()
-        # Avoid the interpreter blocking on Queue feeder threads during shutdown.
-        cancel_join = getattr(self._layout_queue, "cancel_join_thread", None)
-        if callable(cancel_join):
-            cancel_join()
+        self._layout_queue = None
+        try:
+            start_method = mp.get_start_method(allow_none=True) or "spawn"
+            ctx = mp.get_context(start_method)
+            self._layout_queue = ctx.Queue()
+            cancel_join = getattr(self._layout_queue, "cancel_join_thread", None)
+            if callable(cancel_join):
+                cancel_join()
+        except (PermissionError, OSError):
+            warnings.warn(
+                "FewShotDGSampler falling back to in-process queue for episode layouts.",
+                RuntimeWarning,
+            )
+            self._layout_queue = Queue()
+        self._episode_uid = 0
+        self._warned_support_overflow = False
+        expected_query = (
+            self.systems_per_episode
+            * self.domains_per_system
+            * self.classes_per_domain
+            * self.query_per_class
+        )
+        if self.iteration_batch_size > 0:
+            self._estimated_chunks_per_episode = max(
+                1, math.ceil(max(1, expected_query) / self.iteration_batch_size)
+            )
+        else:
+            self._estimated_chunks_per_episode = 1
 
     def _compute_effective_shots(self, requested_total: int) -> Tuple[int, int]:
         min_count = math.inf
@@ -179,9 +211,10 @@ class FewShotDGSampler(Sampler[List[int]]):
     def set_epoch(self, epoch: int) -> None:
         """Set epoch for deterministic but shuffled sampling across epochs."""
         self.epoch = int(epoch)
+        self._episode_uid = 0
 
     def __len__(self) -> int:
-        return self.episodes_per_epoch
+        return self.episodes_per_epoch * self._estimated_chunks_per_episode
 
     def pop_layout(self) -> Optional[EpisodeLayout]:
         """Return the next episode layout emitted during iteration."""
@@ -270,14 +303,15 @@ class FewShotDGSampler(Sampler[List[int]]):
                         )
 
             if episode_indices:
-                layout = EpisodeLayout(
-                    size=len(episode_indices),
-                    requested_support=self._effective_support,
-                    requested_query=self._effective_query,
-                    labels=episode_layout_labels,
+                episode_id = self._next_episode_id()
+                chunk_specs = self._chunk_episode(
+                    episode_indices,
+                    episode_layout_labels,
+                    episode_id=episode_id,
                 )
-                self._layout_queue.put(layout)
-                yield episode_indices
+                for spec in chunk_specs:
+                    self._layout_queue.put(spec.layout)
+                    yield spec.indices
 
     @property
     def layout_queue(self):
@@ -319,3 +353,129 @@ class FewShotDGSampler(Sampler[List[int]]):
         query_taken = min(query, len(remaining))
         query_indices = remaining[:query_taken]
         return support_indices, query_indices
+
+    def _next_episode_id(self) -> str:
+        uid = self._episode_uid
+        self._episode_uid += 1
+        return f"{self.mode}-epoch{self.epoch}-ep{uid}"
+
+    def _chunk_episode(
+        self,
+        episode_indices: List[int],
+        labels: List[EpisodeLabelLayout],
+        *,
+        episode_id: str,
+    ) -> List[EpisodeChunkSpec]:
+        total_query = sum(label.query_count for label in labels)
+        support_total = sum(label.support_count for label in labels)
+        chunk_limit = self.iteration_batch_size
+        if chunk_limit <= 0 or total_query <= chunk_limit:
+            layout = EpisodeLayout(
+                size=len(episode_indices),
+                requested_support=self._effective_support,
+                requested_query=self._effective_query,
+                labels=labels,
+                episode_id=episode_id,
+                chunk_index=0,
+                chunk_count=1,
+            )
+            return [EpisodeChunkSpec(indices=episode_indices, layout=layout)]
+
+        chunk_limit = max(1, chunk_limit)
+        if (
+            support_total >= chunk_limit
+            and not self._warned_support_overflow
+        ):
+            warnings.warn(
+                "Configured batch_size is smaller than the support set; "
+                "each iteration will include the full support set in addition "
+                "to the limited query samples.",
+                RuntimeWarning,
+            )
+            self._warned_support_overflow = True
+        progress = [0 for _ in labels]
+        remaining = total_query
+        chunk_maps: List[Dict[int, Tuple[int, int]]] = []
+
+        while remaining > 0:
+            budget = chunk_limit
+            current_map: Dict[int, Tuple[int, int]] = {}
+            for idx, label in enumerate(labels):
+                if budget <= 0:
+                    break
+                available = label.query_count - progress[idx]
+                if available <= 0:
+                    continue
+                take = min(available, budget)
+                current_map[idx] = (progress[idx], take)
+                progress[idx] += take
+                budget -= take
+                remaining -= take
+                if budget == 0:
+                    break
+            if not current_map:
+                # No more queries can be assigned (should not happen but guard anyway).
+                break
+            chunk_maps.append(current_map)
+
+        if not chunk_maps:
+            # Fallback to original single-chunk behaviour.
+            layout = EpisodeLayout(
+                size=len(episode_indices),
+                requested_support=self._effective_support,
+                requested_query=self._effective_query,
+                labels=labels,
+                episode_id=episode_id,
+                chunk_index=0,
+                chunk_count=1,
+            )
+            return [EpisodeChunkSpec(indices=episode_indices, layout=layout)]
+
+        chunk_count = len(chunk_maps)
+        specs: List[EpisodeChunkSpec] = []
+        for chunk_index, chunk_map in enumerate(chunk_maps):
+            chunk_indices: List[int] = []
+            layout_labels: List[EpisodeLabelLayout] = []
+            cursor = 0
+            for label_idx, label in enumerate(labels):
+                support_slice = episode_indices[
+                    label.support_start : label.support_start + label.support_count
+                ]
+                support_count = len(support_slice)
+                if support_slice:
+                    chunk_indices.extend(support_slice)
+
+                query_offset, query_take = chunk_map.get(label_idx, (0, 0))
+                query_slice = []
+                if query_take > 0:
+                    start = label.query_start + query_offset
+                    end = start + query_take
+                    query_slice = episode_indices[start:end]
+                    chunk_indices.extend(query_slice)
+
+                query_count = len(query_slice)
+                layout_labels.append(
+                    EpisodeLabelLayout(
+                        system_id=label.system_id,
+                        domain_id=label.domain_id,
+                        label_id=label.label_id,
+                        support_start=cursor,
+                        support_count=support_count,
+                        query_start=cursor + support_count,
+                        query_count=query_count,
+                    )
+                )
+                cursor += support_count + query_count
+
+            layout = EpisodeLayout(
+                size=cursor,
+                requested_support=self._effective_support,
+                requested_query=self._effective_query,
+                labels=layout_labels,
+                episode_id=episode_id,
+                chunk_index=chunk_index,
+                chunk_count=chunk_count,
+            )
+            specs.append(EpisodeChunkSpec(indices=chunk_indices, layout=layout))
+
+        return specs

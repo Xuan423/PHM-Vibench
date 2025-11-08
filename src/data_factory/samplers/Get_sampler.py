@@ -50,6 +50,11 @@ def _get_dg_sampler(args_task, args_data, dataset, mode):
             few_shot_cfg=few_shot_cfg,
             mode=mode,
             default_seed=getattr(args_task, 'seed', getattr(args_data, 'seed', 0)),
+            iteration_batch_size=getattr(
+                args_task,
+                'batch_size',
+                getattr(args_data, 'batch_size', 0),
+            ),
         )
     elif mode == 'train':
         sampler = Same_system_Sampler(
