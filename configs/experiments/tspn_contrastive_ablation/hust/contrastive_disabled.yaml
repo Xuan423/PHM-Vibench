@@ -3,7 +3,8 @@ __include__:
 
 model:
   contrastive:
-    enabled: false
+    enabled: true
+    loss_weight: 0.0
 
 task:
   metadata:

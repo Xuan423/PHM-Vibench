@@ -358,6 +358,8 @@ class data_factory:
         val_collate = self._resolve_collate(val_sampler)
         test_collate = self._resolve_collate(test_sampler)
 
+        prefetch_kwargs = {"prefetch_factor": 1} if num_workers > 0 else {}
+
         self.train_loader = DataLoader(
             self.train_dataset,
             batch_sampler=train_sampler,
@@ -365,6 +367,7 @@ class data_factory:
             pin_memory=False,
             persistent_workers=persistent_workers,
             collate_fn=train_collate,
+            **prefetch_kwargs,
         )
         self.val_loader = DataLoader(
             self.val_dataset,
@@ -373,6 +376,7 @@ class data_factory:
             pin_memory=False,
             persistent_workers=persistent_workers,
             collate_fn=val_collate,
+            **prefetch_kwargs,
         )
         self.test_loader = DataLoader(
             self.test_dataset,
@@ -381,6 +385,7 @@ class data_factory:
             pin_memory=False,
             persistent_workers=persistent_workers,
             collate_fn=test_collate,
+            **prefetch_kwargs,
         )
 
         return self.train_loader, self.val_loader, self.test_loader
