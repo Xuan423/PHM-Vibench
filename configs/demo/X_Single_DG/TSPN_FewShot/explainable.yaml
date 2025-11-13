@@ -1,4 +1,4 @@
-# Full pipeline example: contrastive TSPN with explainability exports enabled.
+# Full pipeline example: contrastive TSPN with extended logging.
 
 environment:
   WANDB_MODE: "disabled"
@@ -50,21 +50,20 @@ model:
 
   contrastive:
     enabled: true
-    projection_hidden: 0
-    projection_dim: 0
     temperature: 0.2
     loss_weight: 0.2
-    mode: "supervised"
     physical_projector:
-      enabled: true
       indicator_dim: 64
-      init: "kaiming"
-      sparsity_l1: 1.0e-4
-      sparsity_group: 0.0
+      init: "uniform"
+      simplex_eps: 1.0e-6
+      spd_rank: 4
+      tau_init: 1.0
+      tau_min: 1.0e-4
       prior:
         path: null
         format: "npy"
         temperature: 1.0
+    reg_weight: 1.0e-4
 
   mining:
     strategy: "domain"
@@ -109,37 +108,24 @@ task:
     episodes_per_epoch: 10 # 200
     warn_on_shortfall: true
     format: "episode"
-
-  explainability:
-    enabled: true
-    output_subdir: "explainability"
-    device: "auto"
-    summary:
-      top_k_features: 10
-      save_embeddings: true
-    attribution:
-      method: "grad_cam"
-      smooth: true
-      samples: 32
-
   contrastive:
     temperature: 0.2
     loss_weight: 0.2
-    normalize_embeddings: true
     log_components: true
-    support_loss:
-      mode: "hybrid"
-      loss_weight: 0.5
-      ce_weight: 1.0
-      prototype_weight: 0.5
-      prototype_metric: "cosine"
-      detach_prototypes: false
-      log_prefix: "support"
-    weighting:
-      strategy: "uncertainty"
-      alpha: 1.0
-      ema: 0.9
-      temperature: 1.0
+    reg_weight: 1.0e-4
+    pcc:
+      lambda_pos: 1.0
+      lambda_neg: 1.1
+      cos_threshold_deg: 22.0
+      augmentation:
+        enable_phi: true
+        time_shift_pct: 0.05
+        amplitude_min: 0.85
+        amplitude_max: 1.15
+        stretch_min: 0.95
+        stretch_max: 1.05
+        ripple_db: 2.0
+        views_per_sample: 3
 
 trainer:
   name: "Default_trainer"

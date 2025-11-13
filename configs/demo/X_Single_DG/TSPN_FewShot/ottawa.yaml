@@ -16,11 +16,20 @@ model:
   in_channels: 2
   contrastive:
     enabled: true
-    projection_hidden: 512
-    projection_dim: 128
     temperature: &contrastive_temp 0.2
     loss_weight: &contrastive_loss_weight 0.2
-    mode: "supervised"
+    reg_weight: 1.0e-4
+    physical_projector:
+      indicator_dim: 64
+      init: "uniform"
+      simplex_eps: 1.0e-6
+      spd_rank: 4
+      tau_init: 1.0
+      tau_min: 1.0e-4
+      prior:
+        path: null
+        format: "npy"
+        temperature: 1.0
   mining:
     strategy: "domain"
 
@@ -48,7 +57,20 @@ task:
   contrastive:
     temperature: *contrastive_temp
     loss_weight: *contrastive_loss_weight
-    normalize_embeddings: true
+    reg_weight: 1.0e-4
+    pcc:
+      lambda_pos: 1.0
+      lambda_neg: 1.0
+      cos_threshold_deg: 25.0
+      augmentation:
+        enable_phi: true
+        time_shift_pct: 0.05
+        amplitude_min: 0.85
+        amplitude_max: 1.15
+        stretch_min: 0.95
+        stretch_max: 1.05
+        ripple_db: 2.0
+        views_per_sample: 2
 
 trainer:
   name: "contrastive_trainer"

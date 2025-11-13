@@ -1,35 +1,25 @@
-"""Domain generalisation classification task with contrastive learning."""
+"""Domain generalisation classification task with physics-conditioned contrastive learning."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence
 import warnings
 
 import torch
-import torch.nn.functional as F
 
 from ...Default_task import Default_task
-from ....data_factory.batch import EpisodeBatch, EpisodeLabelView
-from ....utils.explainability import export_tspn_explainability
-
-CANONICAL_BRANCHES: Tuple[str, ...] = ("support_support", "support_query", "query_query")
-
-
-@dataclass
-class ContrastiveBranchStat:
-    name: str
-    loss: torch.Tensor
-    positive_count: torch.Tensor
-    anchor_count: torch.Tensor
-    weight: Optional[torch.Tensor] = None
+from ....data_factory.batch import EpisodeBatch
+from ...losses import (
+    PCCAugmentationConfig,
+    PCCBatchBuilder,
+    PCCBuilderConfig,
+    PCCLossConfig,
+    PhysicsConditionedContrastiveLoss,
+)
 
 
-@dataclass
-class BranchSpec:
-    enabled: bool = True
-    participates: bool = True
+
 
 
 class task(Default_task):
@@ -61,105 +51,38 @@ class task(Default_task):
         def _get(cfg, key, default):
             return getattr(cfg, key, default) if cfg and hasattr(cfg, key) else default
 
-        self.contrastive_weight = float(
-            _get(task_cfg, "loss_weight", _get(model_cfg, "loss_weight", 0.0))
-        )
+        self.lambda_pcc = float(_get(task_cfg, "loss_weight", _get(model_cfg, "loss_weight", 0.0)))
         self.temperature = float(
             max(_get(task_cfg, "temperature", _get(model_cfg, "temperature", 1.0)), 1e-6)
         )
-        self.normalize_embeddings = bool(_get(task_cfg, "normalize_embeddings", True))
         self.log_components = bool(_get(task_cfg, "log_components", False))
-        self.mode = _get(task_cfg, "mode", _get(model_cfg, "mode", "supervised"))
+        self.lambda_reg = float(_get(task_cfg, "reg_weight", _get(model_cfg, "reg_weight", 0.0)))
 
-        model_support_cfg = getattr(model_cfg, "support_loss", None)
-        support_cfg = getattr(task_cfg, "support_loss", None)
-        self.support_loss_mode = str(
-            _get(support_cfg, "mode", _get(model_support_cfg, "mode", "none"))
-        ).lower()
-        self.support_loss_weight = float(
-            _get(support_cfg, "loss_weight", _get(model_support_cfg, "loss_weight", 0.0))
-        )
-        self.support_detach_prototypes = bool(
-            _get(
-                support_cfg,
-                "detach_prototypes",
-                _get(model_support_cfg, "detach_prototypes", False),
-            )
-        )
-        self.support_prototype_metric = str(
-            _get(
-                support_cfg,
-                "prototype_metric",
-                _get(model_support_cfg, "prototype_metric", "cosine"),
-            )
-        ).lower()
-        self.support_log_prefix = str(
-            _get(support_cfg, "log_prefix", _get(model_support_cfg, "log_prefix", "support"))
-        )
-        self._support_component_weights = {
-            "support_ce": float(
-                _get(support_cfg, "ce_weight", _get(model_support_cfg, "ce_weight", 1.0))
+        pcc_cfg = getattr(task_cfg, "pcc", None)
+        aug_cfg = getattr(pcc_cfg, "augmentation", None)
+        augmentation = PCCAugmentationConfig(
+            enable_phi=bool(_get(aug_cfg, "enable_phi", True)),
+            time_shift_pct=float(_get(aug_cfg, "time_shift_pct", 0.05)),
+            amplitude_range=(
+                float(_get(aug_cfg, "amplitude_min", 0.8)),
+                float(_get(aug_cfg, "amplitude_max", 1.2)),
             ),
-            "support_proto": float(
-                _get(
-                    support_cfg,
-                    "prototype_weight",
-                    _get(model_support_cfg, "prototype_weight", 1.0),
-                )
+            stretch_range=(
+                float(_get(aug_cfg, "stretch_min", 0.95)),
+                float(_get(aug_cfg, "stretch_max", 1.05)),
             ),
-        }
+            ripple_db=float(_get(aug_cfg, "ripple_db", 2.0)),
+            views_per_sample=int(_get(aug_cfg, "views_per_sample", 2)),
+        )
+        builder_config = PCCBuilderConfig(
+            lambda_pos=float(_get(pcc_cfg, "lambda_pos", 1.0)),
+            lambda_neg=float(_get(pcc_cfg, "lambda_neg", 1.0)),
+            cos_threshold_deg=float(_get(pcc_cfg, "cos_threshold_deg", 25.0)),
+            augmentation=augmentation,
+        )
 
-        model_weighting_cfg = getattr(model_cfg, "weighting", None)
-        weighting_cfg = getattr(task_cfg, "weighting", None)
-        self.weighting_strategy = str(
-            _get(weighting_cfg, "strategy", _get(model_weighting_cfg, "strategy", "uniform"))
-        ).lower()
-        self.weighting_alpha = float(
-            _get(weighting_cfg, "alpha", _get(model_weighting_cfg, "alpha", 1.0))
-        )
-        self.weighting_ema = float(
-            _get(weighting_cfg, "ema", _get(model_weighting_cfg, "ema", 0.9))
-        )
-        self.weighting_temperature = float(
-            max(
-                _get(
-                    weighting_cfg,
-                    "temperature",
-                    _get(model_weighting_cfg, "temperature", 1.0),
-                ),
-                1e-6,
-            )
-        )
-        self._branch_loss_ema: Dict[str, float] = {}
-        self._branch_sq_ema: Dict[str, float] = {}
-
-        self._explainability_cfg = getattr(self.args_task, "explainability", None)
-        self._explainability_enabled = bool(
-            getattr(self._explainability_cfg, "enabled", False)
-        )
-        self._cached_embeddings: Dict[str, list] = {"val": [], "test": []}
-        branches_cfg = _get(
-            task_cfg,
-            "branches",
-            _get(model_cfg, "branches", None),
-        )
-        if branches_cfg is not None:
-            self.branch_specs = self._parse_branch_specs(branches_cfg)
-        else:
-            allowed_branches_cfg = _get(
-                task_cfg,
-                "active_branches",
-                _get(model_cfg, "active_branches", None),
-            )
-            allowed = self._parse_active_branches(allowed_branches_cfg)
-            self.branch_specs = {
-                name: BranchSpec(enabled=name in allowed, participates=name in allowed)
-                for name in CANONICAL_BRANCHES
-            }
-        self.allowed_branches = {name for name, spec in self.branch_specs.items() if spec.enabled}
-        self.branch_participation = {
-            name: spec.participates for name, spec in self.branch_specs.items()
-        }
+        self.pcc_builder = PCCBatchBuilder(builder_config, self._encode_for_pcc)
+        self.pcc_loss = PhysicsConditionedContrastiveLoss(PCCLossConfig(temperature=self.temperature))
 
     # ------------------------------------------------------------------
     # Overrides
@@ -170,70 +93,8 @@ class task(Default_task):
         task_id = batch.get("task_id")
         return self.network(x, file_id, task_id, return_embeddings=True)
 
-    def _parse_active_branches(self, branch_config: Any) -> set[str]:
-        default = set(CANONICAL_BRANCHES)
-        if branch_config is None:
-            return default
-
-        if isinstance(branch_config, (list, tuple, set)):
-            items = list(branch_config)
-        elif isinstance(branch_config, str):
-            items = [part.strip() for part in branch_config.split(",")]
-        else:
-            warnings.warn(
-                f"[contrastive] Unsupported active_branches type ({type(branch_config)}); falling back to default.",
-                RuntimeWarning,
-            )
-            return default
-
-        cleaned = {str(item).strip() for item in items if str(item).strip()}
-        canonical = {name for name in cleaned if name in default}
-        if len(canonical) < len(cleaned):
-            warnings.warn(
-                "[contrastive] Ignoring unknown branches in active_branches configuration.",
-                RuntimeWarning,
-            )
-        return canonical or default
-
-    def _parse_branch_specs(self, branch_config: Any) -> Dict[str, BranchSpec]:
-        specs: Dict[str, BranchSpec] = {name: BranchSpec() for name in CANONICAL_BRANCHES}
-        if isinstance(branch_config, Mapping):
-            for raw_name, raw_cfg in branch_config.items():
-                name = str(raw_name).strip()
-                if name not in specs:
-                    warnings.warn(
-                        f"[contrastive] Unknown branch '{name}' in branches configuration; skipping.",
-                        RuntimeWarning,
-                    )
-                    continue
-                if isinstance(raw_cfg, Mapping):
-                    enabled = bool(raw_cfg.get("enabled", True))
-                    participates = bool(raw_cfg.get("participates", enabled))
-                elif isinstance(raw_cfg, bool):
-                    enabled = bool(raw_cfg)
-                    participates = enabled
-                else:
-                    warnings.warn(
-                        f"[contrastive] Unsupported branch specification type for '{name}'; using defaults.",
-                        RuntimeWarning,
-                    )
-                    enabled = True
-                    participates = True
-                specs[name] = BranchSpec(enabled=enabled, participates=participates)
-            return specs
-
-        if isinstance(branch_config, (list, tuple, set)) or isinstance(branch_config, str):
-            active = self._parse_active_branches(branch_config)
-            return {
-                name: BranchSpec(enabled=name in active, participates=name in active)
-                for name in CANONICAL_BRANCHES
-            }
-
-        warnings.warn(
-            f"[contrastive] Unsupported branches configuration type ({type(branch_config)}); using defaults.",
-            RuntimeWarning,
-        )
-        return specs
+    def _encode_for_pcc(self, tensor: torch.Tensor) -> torch.Tensor:
+        return self.network.encode(tensor)
 
     def _shared_step(self, batch: Any, stage: str, task_id=False):
         if isinstance(batch, EpisodeBatch):
@@ -277,17 +138,11 @@ class task(Default_task):
             if reg_type != "total":
                 step_metrics[f"{stage}_{reg_type}_reg_loss"] = reg_loss_val
 
-        total_loss = ce_loss + reg_dict.get(
-            "total", torch.tensor(0.0, device=ce_loss.device)
-        )
+        total_loss = ce_loss + reg_dict.get("total", torch.tensor(0.0, device=ce_loss.device))
 
         if indicator_penalties:
-            penalty_total = torch.tensor(0.0, device=ce_loss.device)
             for name, value in indicator_penalties.items():
-                penalty_total = penalty_total + value
                 step_metrics[f"{stage}_{name}"] = value
-            step_metrics[f"{stage}_indicator_penalty_total"] = penalty_total
-            total_loss = total_loss + penalty_total
 
         if indicator_weights and self.log_components:
             weight_matrix = indicator_weights.get("weight")
@@ -295,72 +150,20 @@ class task(Default_task):
                 norm_value = torch.as_tensor(weight_matrix.norm(), device=ce_loss.device)
                 step_metrics[f"{stage}_indicator_weight_norm"] = norm_value
 
-        query_domains = self._resolve_domains_tensor(file_ids, device=logits.device)
-        branch_stats = self._build_contrastive_branches(
-            support_projection=None,
-            support_labels=None,
-            support_domains=None,
-            query_projection=projections,
-            query_labels=y,
-            query_domains=query_domains,
-        )
-        contrastive_loss, branch_weights = self._combine_contrastive_branches(branch_stats)
+        metric_reg_value = self._log_metric_regularizer(step_metrics, stage, logits.device)
+        if self.lambda_reg > 0:
+            metric_reg_loss = metric_reg_value * self.lambda_reg
+            step_metrics[f"{stage}_metric_reg_weighted"] = metric_reg_loss
+            total_loss = total_loss + metric_reg_loss
 
-        for name, stat in branch_stats.items():
-            step_metrics[f"{stage}_contrastive_{name}_loss"] = stat.loss
-            step_metrics[f"{stage}_contrastive_{name}_positives"] = stat.positive_count
-            step_metrics[f"{stage}_contrastive_{name}_anchors"] = stat.anchor_count
-            weight = branch_weights.get(name)
-            if weight is not None:
-                step_metrics[f"{stage}_contrastive_{name}_weight"] = weight
-            participates_flag = 1.0 if self.branch_participation.get(name, True) else 0.0
-            step_metrics[f"{stage}_contrastive_{name}_participates"] = torch.as_tensor(
-                participates_flag, device=stat.loss.device, dtype=stat.loss.dtype
-            )
-            participates_flag = 1.0 if self.branch_participation.get(name, True) else 0.0
-            step_metrics[f"{stage}_contrastive_{name}_participates"] = torch.as_tensor(
-                participates_flag, device=stat.loss.device, dtype=stat.loss.dtype
-            )
-
-        if contrastive_loss is not None:
-            step_metrics[f"{stage}_contrastive_loss"] = contrastive_loss
-            weighted = contrastive_loss * self.contrastive_weight
-            step_metrics[f"{stage}_contrastive_weighted_loss"] = weighted
-            total_loss = total_loss + weighted
-            if self.log_components:
-                device = logits.device
-                step_metrics[f"{stage}_contrastive_temperature"] = torch.as_tensor(
-                    self.temperature, device=device
-                )
-                step_metrics[f"{stage}_contrastive_weight"] = torch.as_tensor(
-                    self.contrastive_weight, device=device
-                )
+        zero = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
+        step_metrics[f"{stage}_pcc_loss"] = zero
+        step_metrics[f"{stage}_pcc_weighted_loss"] = zero
+        step_metrics[f"{stage}_pcc_positive_count"] = zero
+        step_metrics[f"{stage}_pcc_anchor_count"] = zero
 
         step_metrics[f"{stage}_total_loss"] = total_loss
         step_metrics[f"{stage}_batch_size"] = torch.tensor(y.size(0), device=total_loss.device)
-
-        indicator_snapshot = None
-        if indicator_weights or branch_weights or projection_matrix is not None:
-            indicator_snapshot = {}
-            if indicator_weights:
-                indicator_snapshot["indicator_weights"] = {
-                    key: tensor.cpu() for key, tensor in indicator_weights.items()
-                }
-            if projection_matrix is not None:
-                indicator_snapshot["projection_matrix"] = projection_matrix.cpu()
-            if branch_weights:
-                indicator_snapshot["branch_weights"] = {
-                    name: weight.detach().cpu() for name, weight in branch_weights.items()
-                }
-
-        if self._explainability_enabled and stage in ("val", "test"):
-            self._cache_for_explainability(
-                stage,
-                projections.detach(),
-                file_ids,
-                y,
-                indicator_snapshot=indicator_snapshot,
-            )
 
         return step_metrics
 
@@ -381,12 +184,9 @@ class task(Default_task):
         data_name = meta_row.get("Name", "unknown")
 
         support_count = batch.support_x.size(0)
-        support_file_ids: List[Any] = []
-        support_y = batch.support_y.to(device) if support_count > 0 else None
-        support_projection = None
         support_embeddings = None
-        support_logits = None
-        support_losses: Dict[str, torch.Tensor] = {}
+        support_y = batch.support_y.to(device) if support_count > 0 else None
+        support_file_ids: List[Any] = []
 
         if support_count > 0:
             support_file_ids = self._normalise_file_ids(batch.support_file_ids)
@@ -396,11 +196,7 @@ class task(Default_task):
                 task_id="contrastive_classification",
                 return_embeddings=True,
             )
-            support_logits = support_outputs["logits"]
             support_embeddings = support_outputs["embeddings"]
-            support_projection = support_outputs["projection"]
-
-        prototype_tensor = self._compute_prototypes(support_embeddings, batch.label_views)
 
         query_outputs = self.network(
             query_x,
@@ -410,7 +206,6 @@ class task(Default_task):
         )
         logits = query_outputs["logits"]
         query_embeddings = query_outputs["embeddings"]
-        query_projection = query_outputs["projection"]
         indicator_penalties = query_outputs.get("indicator_penalties", {})
         indicator_weights_fn = getattr(self.network, "explain_indicator_weights", None)
         indicator_weights = indicator_weights_fn() if callable(indicator_weights_fn) else None
@@ -433,39 +228,9 @@ class task(Default_task):
 
         total_loss = ce_loss + reg_dict.get("total", torch.tensor(0.0, device=ce_loss.device))
 
-        if (
-            support_count > 0
-            and batch.is_first_chunk
-            and self.support_loss_weight > 0
-            and self.support_loss_mode in {"cross_entropy", "prototype", "hybrid"}
-        ):
-            support_losses = self._compute_support_losses(
-                logits=support_logits,
-                embeddings=support_embeddings,
-                labels=support_y,
-                label_views=batch.label_views,
-            )
-
-        if support_losses:
-            combined_support = torch.tensor(0.0, device=ce_loss.device)
-            for key, loss_val in support_losses.items():
-                component_weight = self._support_component_weights.get(key, 1.0)
-                step_metrics[f"{stage}_{key}"] = loss_val
-                weighted_component = loss_val * component_weight
-                step_metrics[f"{stage}_{key}_weighted"] = weighted_component
-                combined_support = combined_support + weighted_component
-            weighted_support_loss = combined_support * self.support_loss_weight
-            step_metrics[f"{stage}_{self.support_log_prefix}_loss"] = combined_support
-            step_metrics[f"{stage}_{self.support_log_prefix}_weighted_loss"] = weighted_support_loss
-            total_loss = total_loss + weighted_support_loss
-
         if indicator_penalties:
-            penalty_total = torch.tensor(0.0, device=ce_loss.device)
             for name, value in indicator_penalties.items():
-                penalty_total = penalty_total + value
                 step_metrics[f"{stage}_{name}"] = value
-            step_metrics[f"{stage}_indicator_penalty_total"] = penalty_total
-            total_loss = total_loss + penalty_total
 
         if indicator_weights and self.log_components:
             weight_matrix = indicator_weights.get("weight")
@@ -473,78 +238,50 @@ class task(Default_task):
                 norm_value = torch.as_tensor(weight_matrix.norm(), device=ce_loss.device)
                 step_metrics[f"{stage}_indicator_weight_norm"] = norm_value
 
-        support_domains = (
-            self._resolve_domains_tensor(support_file_ids, device=ce_loss.device)
-            if support_count > 0
-            else None
-        )
-        query_domains = self._resolve_domains_tensor(query_file_ids, device=ce_loss.device)
-        branch_stats = self._build_contrastive_branches(
-            support_projection=support_projection,
-            support_labels=support_y,
-            support_domains=support_domains,
-            query_projection=query_projection,
+        metric_reg_value = self._log_metric_regularizer(step_metrics, stage, logits.device)
+        if self.lambda_reg > 0:
+            metric_reg_loss = metric_reg_value * self.lambda_reg
+            step_metrics[f"{stage}_metric_reg_weighted"] = metric_reg_loss
+            total_loss = total_loss + metric_reg_loss
+
+        metric = getattr(self.network, "spd_metric", None)
+        if metric is None:
+            raise RuntimeError("SPD metric is required for PCC loss but not found on network.")
+
+        pcc_context = self.pcc_builder.build(
+            query_embeddings=query_embeddings,
             query_labels=query_y,
-            query_domains=query_domains,
+            support_embeddings=support_embeddings,
+            support_labels=support_y,
+            query_x=query_x,
+            metric=metric,
         )
-        contrastive_loss, branch_weights = self._combine_contrastive_branches(branch_stats)
+        pcc_stats = self.pcc_loss(metric, pcc_context)
+        step_metrics[f"{stage}_pcc_loss"] = pcc_stats["loss"]
+        step_metrics[f"{stage}_pcc_positive_count"] = pcc_stats["positive_count"]
+        step_metrics[f"{stage}_pcc_anchor_count"] = pcc_stats["anchor_count"]
 
-        for name, stat in branch_stats.items():
-            step_metrics[f"{stage}_contrastive_{name}_loss"] = stat.loss
-            step_metrics[f"{stage}_contrastive_{name}_positives"] = stat.positive_count
-            step_metrics[f"{stage}_contrastive_{name}_anchors"] = stat.anchor_count
-            weight = branch_weights.get(name)
-            if weight is not None:
-                step_metrics[f"{stage}_contrastive_{name}_weight"] = weight
-            participates_flag = 1.0 if self.branch_participation.get(name, True) else 0.0
-            step_metrics[f"{stage}_contrastive_{name}_participates"] = torch.as_tensor(
-                participates_flag, device=stat.loss.device, dtype=stat.loss.dtype
-            )
-
-        if contrastive_loss is not None:
-            step_metrics[f"{stage}_contrastive_loss"] = contrastive_loss
-            weighted = contrastive_loss * self.contrastive_weight
-            step_metrics[f"{stage}_contrastive_weighted_loss"] = weighted
-            total_loss = total_loss + weighted
-            if self.log_components:
-                device_for_logs = logits.device
-                step_metrics[f"{stage}_contrastive_temperature"] = torch.as_tensor(
-                    self.temperature, device=device_for_logs
-                )
-                step_metrics[f"{stage}_contrastive_weight"] = torch.as_tensor(
-                    self.contrastive_weight, device=device_for_logs
-                )
-
-        if prototype_tensor is not None and self.log_components:
-            step_metrics[f"{stage}_prototype_norm_mean"] = prototype_tensor.norm(dim=-1).mean()
+        weighted_pcc = pcc_stats["loss"] * self.lambda_pcc
+        step_metrics[f"{stage}_pcc_weighted_loss"] = weighted_pcc
+        total_loss = total_loss + weighted_pcc
 
         step_metrics[f"{stage}_total_loss"] = total_loss
         step_metrics[f"{stage}_batch_size"] = torch.tensor(query_y.size(0), device=total_loss.device)
 
-        indicator_snapshot = None
-        if indicator_weights or branch_weights or projection_matrix is not None:
-            indicator_snapshot = {}
-            if indicator_weights:
-                indicator_snapshot["indicator_weights"] = {
-                    key: tensor.cpu() for key, tensor in indicator_weights.items()
-                }
-            if projection_matrix is not None:
-                indicator_snapshot["projection_matrix"] = projection_matrix.cpu()
-            if branch_weights:
-                indicator_snapshot["branch_weights"] = {
-                    name: weight.detach().cpu() for name, weight in branch_weights.items()
-                }
-
-        if self._explainability_enabled and stage in ("val", "test"):
-            self._cache_for_explainability(
-                stage,
-                query_projection.detach(),
-                query_file_ids,
-                query_y,
-                indicator_snapshot=indicator_snapshot,
-            )
-
         return step_metrics
+
+    def _log_metric_regularizer(
+        self,
+        step_metrics: Dict[str, torch.Tensor],
+        stage: str,
+        device: torch.device,
+    ) -> torch.Tensor:
+        metric_fn = getattr(self.network, "metric_regularization", None)
+        if not callable(metric_fn):
+            return torch.tensor(0.0, device=device)
+        value = metric_fn()
+        step_metrics[f"{stage}_metric_reg"] = value
+        return value
 
     @staticmethod
     def _normalise_file_ids(file_ids: Sequence[Any]) -> list:
@@ -555,396 +292,3 @@ class task(Default_task):
             else:
                 normalised.append(fid)
         return normalised
-
-    @staticmethod
-    def _compute_prototypes(
-        support_embeddings: Optional[torch.Tensor],
-        label_views: Sequence[EpisodeLabelView],
-    ) -> Optional[torch.Tensor]:
-        if support_embeddings is None or support_embeddings.size(0) == 0:
-            return None
-        prototypes = []
-        for view in label_views:
-            if view.support_count == 0:
-                continue
-            proto = support_embeddings[view.support_slice].mean(dim=0)
-            prototypes.append(proto)
-        if not prototypes:
-            return None
-        return torch.stack(prototypes, dim=0)
-
-    # ------------------------------------------------------------------
-    # Contrastive utilities
-    # ------------------------------------------------------------------
-    def _compute_support_losses(
-        self,
-        *,
-        logits: Optional[torch.Tensor],
-        embeddings: Optional[torch.Tensor],
-        labels: Optional[torch.Tensor],
-        label_views: Sequence[EpisodeLabelView],
-    ) -> Dict[str, torch.Tensor]:
-        losses: Dict[str, torch.Tensor] = {}
-        if labels is None or labels.numel() == 0:
-            return losses
-
-        mode = self.support_loss_mode
-        if mode in {"cross_entropy", "hybrid"} and logits is not None:
-            losses["support_ce"] = self._compute_loss(logits, labels)
-
-        if mode in {"prototype", "hybrid"} and embeddings is not None:
-            prototypes = self._compute_prototypes(embeddings, label_views)
-            if prototypes is not None:
-                if self.support_detach_prototypes:
-                    prototypes = prototypes.detach()
-                proto_loss = self._prototype_alignment_loss(embeddings, prototypes, label_views)
-                losses["support_proto"] = proto_loss
-
-        return losses
-
-    def _prototype_alignment_loss(
-        self,
-        embeddings: torch.Tensor,
-        prototypes: torch.Tensor,
-        label_views: Sequence[EpisodeLabelView],
-    ) -> torch.Tensor:
-        losses: List[torch.Tensor] = []
-        proto_idx = 0
-        for view in label_views:
-            if view.support_count == 0:
-                continue
-            samples = embeddings[view.support_slice]
-            if samples.numel() == 0:
-                proto_idx += 1
-                continue
-            prototype_vec = prototypes[proto_idx]
-            proto_idx += 1
-            if self.support_prototype_metric == "cosine":
-                similarity = F.cosine_similarity(samples, prototype_vec.unsqueeze(0), dim=-1)
-                losses.append(1.0 - similarity.mean())
-            else:
-                losses.append(
-                    F.mse_loss(
-                        samples,
-                        prototype_vec.unsqueeze(0).expand_as(samples),
-                    )
-                )
-        if not losses:
-            return torch.tensor(0.0, device=embeddings.device)
-        return torch.stack(losses).mean()
-
-    def _build_contrastive_branches(
-        self,
-        *,
-        support_projection: Optional[torch.Tensor],
-        support_labels: Optional[torch.Tensor],
-        support_domains: Optional[torch.Tensor],
-        query_projection: Optional[torch.Tensor],
-        query_labels: Optional[torch.Tensor],
-        query_domains: Optional[torch.Tensor],
-    ) -> Dict[str, ContrastiveBranchStat]:
-        branches: Dict[str, ContrastiveBranchStat] = {}
-
-        if "query_query" in self.allowed_branches:
-            query_stat = self._contrastive_branch(
-                name="query_query",
-                anchors=query_projection,
-                anchor_labels=query_labels,
-                anchor_domains=query_domains,
-                candidates=query_projection,
-                candidate_labels=query_labels,
-                candidate_domains=query_domains,
-                exclude_self=True,
-            )
-            if query_stat is not None:
-                branches[query_stat.name] = query_stat
-
-        if support_projection is not None and support_labels is not None and support_labels.numel() > 0:
-            if "support_support" in self.allowed_branches:
-                support_stat = self._contrastive_branch(
-                    name="support_support",
-                    anchors=support_projection,
-                    anchor_labels=support_labels,
-                    anchor_domains=support_domains,
-                    candidates=support_projection,
-                    candidate_labels=support_labels,
-                    candidate_domains=support_domains,
-                    exclude_self=True,
-                )
-                if support_stat is not None:
-                    branches[support_stat.name] = support_stat
-
-            if "support_query" in self.allowed_branches:
-                cross_stat = self._contrastive_cross_branch(
-                    name="support_query",
-                    support_projection=support_projection,
-                    support_labels=support_labels,
-                    support_domains=support_domains,
-                    query_projection=query_projection,
-                    query_labels=query_labels,
-                    query_domains=query_domains,
-                )
-                if cross_stat is not None:
-                    branches[cross_stat.name] = cross_stat
-
-        return branches
-
-    def _contrastive_cross_branch(
-        self,
-        *,
-        name: str,
-        support_projection: Optional[torch.Tensor],
-        support_labels: Optional[torch.Tensor],
-        support_domains: Optional[torch.Tensor],
-        query_projection: Optional[torch.Tensor],
-        query_labels: Optional[torch.Tensor],
-        query_domains: Optional[torch.Tensor],
-    ) -> Optional[ContrastiveBranchStat]:
-        forward = self._contrastive_branch(
-            name=f"{name}_forward",
-            anchors=support_projection,
-            anchor_labels=support_labels,
-            anchor_domains=support_domains,
-            candidates=query_projection,
-            candidate_labels=query_labels,
-            candidate_domains=query_domains,
-            exclude_self=False,
-        )
-        backward = self._contrastive_branch(
-            name=f"{name}_backward",
-            anchors=query_projection,
-            anchor_labels=query_labels,
-            anchor_domains=query_domains,
-            candidates=support_projection,
-            candidate_labels=support_labels,
-            candidate_domains=support_domains,
-            exclude_self=False,
-        )
-
-        if forward is None and backward is None:
-            return None
-
-        components: List[ContrastiveBranchStat] = [b for b in (forward, backward) if b is not None]
-        losses = torch.stack([comp.loss for comp in components])
-        combined_loss = losses.mean()
-        combined_positive = sum(comp.positive_count for comp in components)
-        combined_anchor = sum(comp.anchor_count for comp in components)
-
-        return ContrastiveBranchStat(
-            name=name,
-            loss=combined_loss,
-            positive_count=combined_positive.to(combined_loss),
-            anchor_count=combined_anchor.to(combined_loss),
-        )
-
-    def _contrastive_branch(
-        self,
-        *,
-        name: str,
-        anchors: Optional[torch.Tensor],
-        anchor_labels: Optional[torch.Tensor],
-        anchor_domains: Optional[torch.Tensor],
-        candidates: Optional[torch.Tensor],
-        candidate_labels: Optional[torch.Tensor],
-        candidate_domains: Optional[torch.Tensor],
-        exclude_self: bool,
-    ) -> Optional[ContrastiveBranchStat]:
-        if (
-            anchors is None
-            or candidates is None
-            or anchor_labels is None
-            or candidate_labels is None
-            or anchors.size(0) == 0
-            or candidates.size(0) == 0
-        ):
-            return None
-
-        feats_anchor = anchors
-        feats_candidate = candidates
-        if self.normalize_embeddings:
-            feats_anchor = F.normalize(feats_anchor, dim=-1)
-            feats_candidate = F.normalize(feats_candidate, dim=-1)
-
-        logits = torch.matmul(feats_anchor, feats_candidate.T) / self.temperature
-        logits = logits - torch.max(logits, dim=1, keepdim=True).values
-
-        positive_mask = anchor_labels.view(-1, 1) == candidate_labels.view(1, -1)
-        if self.mode == "domain-aware" and anchor_domains is not None and candidate_domains is not None:
-            domain_mask = anchor_domains.view(-1, 1) != candidate_domains.view(1, -1)
-            positive_mask = positive_mask & domain_mask
-
-        if exclude_self and anchors.size(0) == candidates.size(0):
-            diag = torch.eye(anchors.size(0), device=logits.device, dtype=torch.bool)
-            logits = logits.masked_fill(diag, float("-inf"))
-            positive_mask = positive_mask & ~diag
-
-        positive_counts = positive_mask.sum(dim=1)
-        valid = positive_counts > 0
-        if not torch.any(valid):
-            return None
-
-        exp_logits = torch.exp(logits)
-        log_prob = logits - torch.log(exp_logits.sum(dim=1, keepdim=True) + 1e-12)
-        masked_log_prob = torch.where(positive_mask, log_prob, torch.zeros_like(log_prob))
-        mean_log_prob_pos = masked_log_prob.sum(dim=1) / positive_counts.clamp(min=1.0).float()
-        loss = -mean_log_prob_pos[valid].mean()
-
-        return ContrastiveBranchStat(
-            name=name,
-            loss=loss,
-            positive_count=positive_counts[valid].sum().to(loss),
-            anchor_count=torch.as_tensor(float(valid.sum().item()), device=loss.device, dtype=loss.dtype),
-        )
-
-    def _combine_contrastive_branches(
-        self, branches: Dict[str, ContrastiveBranchStat]
-    ) -> Tuple[Optional[torch.Tensor], Dict[str, torch.Tensor]]:
-        if not branches:
-            return None, {}
-
-        device = next(iter(branches.values())).loss.device
-        dtype = next(iter(branches.values())).loss.dtype
-
-        total_positive = sum(float(stat.positive_count.detach().item()) for stat in branches.values())
-        if total_positive > 0:
-            base_weights = {
-                name: float(stat.positive_count.detach().item()) / total_positive
-                for name, stat in branches.items()
-            }
-        else:
-            uniform = 1.0 / len(branches)
-            base_weights = {name: uniform for name in branches}
-
-        if self.weighting_strategy == "gradnorm":
-            weight_dict = self._gradnorm_weights(branches, base_weights)
-        elif self.weighting_strategy == "uncertainty":
-            weight_dict = self._uncertainty_weights(branches, base_weights)
-        elif self.weighting_strategy in {"uniform", "none"}:
-            weight_dict = base_weights
-        else:
-            weight_dict = {
-                name: weight ** self.weighting_alpha for name, weight in base_weights.items()
-            }
-
-        total_weight = sum(weight_dict.values())
-        if total_weight <= 0:
-            weight_dict = {name: 1.0 / len(branches) for name in branches}
-            total_weight = 1.0
-
-        normalised = {name: weight / total_weight for name, weight in weight_dict.items()}
-        branch_weights = {
-            name: torch.as_tensor(weight, device=device, dtype=dtype) for name, weight in normalised.items()
-        }
-
-        if self.contrastive_weight <= 0:
-            for name, weight in branch_weights.items():
-                branches[name].weight = weight
-            return None, branch_weights
-
-        participation = getattr(self, "branch_participation", {})
-        weighted_losses: List[torch.Tensor] = []
-        for name, stat in branches.items():
-            weight = branch_weights.get(name, torch.tensor(0.0, device=device, dtype=dtype))
-            stat.weight = weight
-            participates = participation.get(name, True)
-            if participates:
-                weighted_losses.append(stat.loss * weight)
-            else:
-                weighted_losses.append(stat.loss * 0.0)
-
-        combined_loss = torch.stack(weighted_losses).sum()
-        return combined_loss, branch_weights
-
-    def _gradnorm_weights(
-        self,
-        branches: Dict[str, ContrastiveBranchStat],
-        base_weights: Dict[str, float],
-    ) -> Dict[str, float]:
-        eps = 1e-8
-        weights: Dict[str, float] = {}
-        for name, stat in branches.items():
-            loss_val = abs(float(stat.loss.detach().item()))
-            ema = self._branch_loss_ema.get(name, loss_val)
-            ema = self.weighting_ema * ema + (1.0 - self.weighting_ema) * loss_val
-            self._branch_loss_ema[name] = ema
-            ratio = (loss_val / (ema + eps)) ** self.weighting_alpha
-            weights[name] = base_weights.get(name, 0.0) * ratio
-        return weights
-
-    def _uncertainty_weights(
-        self,
-        branches: Dict[str, ContrastiveBranchStat],
-        base_weights: Dict[str, float],
-    ) -> Dict[str, float]:
-        eps = 1e-8
-        weights: Dict[str, float] = {}
-        for name, stat in branches.items():
-            loss_val = abs(float(stat.loss.detach().item()))
-            ema = self._branch_loss_ema.get(name, loss_val)
-            ema = self.weighting_ema * ema + (1.0 - self.weighting_ema) * loss_val
-            self._branch_loss_ema[name] = ema
-            sq_ema = self._branch_sq_ema.get(name, loss_val**2)
-            sq_ema = self.weighting_ema * sq_ema + (1.0 - self.weighting_ema) * (loss_val**2)
-            self._branch_sq_ema[name] = sq_ema
-            variance = max(sq_ema - ema**2, eps)
-            weights[name] = base_weights.get(name, 0.0) / variance
-        return weights
-
-    def _resolve_domains_tensor(self, file_ids: list, device: torch.device) -> torch.Tensor:
-        domains = []
-        for fid in file_ids:
-            meta = self.metadata[fid]
-            domains.append(int(meta.get("Domain_id", -1)))
-        return torch.as_tensor(domains, device=device)
-
-    def on_validation_epoch_end(self) -> None:
-        super().on_validation_epoch_end()
-        self._export_stage_explainability('val')
-
-    def on_test_epoch_end(self) -> None:
-        super().on_test_epoch_end()
-        self._export_stage_explainability('test')
-
-    def _export_stage_explainability(self, stage: str) -> None:
-        if not self._explainability_enabled:
-            return
-        cache = self._cached_embeddings.get(stage, [])
-        if not cache:
-            return
-        base_dir = getattr(self.args_environment, 'output_dir', '.')
-        run_name = getattr(self.args_trainer, 'logger_name', None)
-        if run_name:
-            export_root = str(Path(base_dir) / run_name)
-        else:
-            export_root = str(Path(base_dir))
-        export_tspn_explainability(
-            stage=stage,
-            cached_batches=cache,
-            metadata=self.metadata,
-            config=self._explainability_cfg,
-            output_dir=export_root,
-        )
-        self._cached_embeddings[stage].clear()
-
-    # ------------------------------------------------------------------
-    # Explainability cache (populated in Task 5)
-    # ------------------------------------------------------------------
-    def _cache_for_explainability(
-        self,
-        stage: str,
-        projections: torch.Tensor,
-        file_ids: list,
-        labels: torch.Tensor,
-        *,
-        indicator_snapshot: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        if not self._explainability_enabled:
-            return
-        payload: Dict[str, Any] = {
-            "embeddings": projections.cpu(),
-            "file_ids": list(file_ids),
-            "labels": labels.detach().cpu(),
-        }
-        if indicator_snapshot:
-            payload.update(indicator_snapshot)
-        self._cached_embeddings.setdefault(stage, []).append(payload)

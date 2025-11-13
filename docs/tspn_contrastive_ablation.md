@@ -1,128 +1,35 @@
-# Unified TSPN Contrastive Ablation Guide
+# TSPN Physics-Conditioned Contrastive Workflow
 
-This document describes the unified ablation workflow that extends the original HUST-only scripts to cover both HUST and SDUST datasets with consistent branch-weight handling, episodic batch chunking, and consolidated accuracy reporting via `tspn_resummarise.py`.
+The original multi-branch (`support_support`, `support_query`, `query_query`) ablation suite has been retired. All legacy configs and scripts now live under `archive/legacy_tspn_contrastive_ablation/` for reference-only use. The active workflow replaces branch toggles with a single physics-conditioned contrastive (PCC) objective driven by:
 
-## Overview
+1. **Convex Combination Projector** – mixes backbone operators via simplex-constrained matrix `A`.
+2. **SPD Coupling Metric** – applies `M = D + L L^T` and learnable temperature vector `τ` (with `‖L‖²_F` regularisation).
+3. **PCC Loss** – builds positives from cross-domain supports + physics-consistent query views and negatives from inter-class samples, all under the SPD kernel.
 
-- Entrypoint: `script/hparam_eval/tspn_contrastive_ablation.py`
-- Shell helper: `script/hparam_eval/run_tspn_contrastive_ablation.sh`
-- Config root: `configs/experiments/tspn_contrastive_ablation/`
-  - `hust/`: inherits demo few-shot hyperparameters
-  - `sdust/`: applies SDUST-specific few-shot overrides
-- Branch toggles are controlled via `task.contrastive.branches` using `enabled` / `participates` fields. Disabling a branch now keeps the three-way weighting intact while zeroing the contribution in the total loss.
-- `task.batch_size` is the single source of truth for episodic batching; it caps the number of query samples per Lightning iteration while each chunk continues to include the full support set.
+## Running the New Pipeline
 
-## Dataset Recipes
-
-### HUST
-
-- Target system: `[19]`
-- Domain tasks (target domain `10`):
-  1. Sources `[0,1,2,3,4]` → target `[10]`
-  2. Sources `[0,2,4,6,8]` → target `[10]`
-  3. Sources `[1,3,5,7,9]` → target `[10]`
-- Few-shot sampler: reuse demo defaults (episodes over 4 domains × 5 classes).
-
-### SDUST
-
-- Target system: `[21]`
-- Domain tasks:
-  1. `[0,4,9,13,17,21]` → `[37]`
-  2. `[1,5,10,14,18,22]` → `[38]`
-  3. `[2,6,11,15,19,23]` → `[39]`
-  4. `[3,7,12,16,20,24]` → `[40]`
-- Few-shot overrides in `sdust/base.yaml`:
-  - `domains_per_episode=4`
-  - `classes_per_domain=8`
-  - `support_per_class=3`
-  - `query_per_class=10`
-
-## Variants
-
-| Variant | Description | Branch participation |
-|---------|-------------|----------------------|
-| `contrastive_full` | All branches active (default `base.yaml`) | `support_support`, `support_query`, `query_query` participate |
-| `contrastive_ssqq` | Support-query branch excluded from total loss | Branch remains enabled but `participates=false` |
-| `contrastive_ss_only` | Only support-support branch contributes | `support_query` / `query_query` disabled |
-| `contrastive_qq_only` | Only query-query branch contributes | `support_support` / `support_query` disabled |
-| `contrastive_qs_only` | Only support-query contributes | `support_support` / `query_query` set to `participates=false` |
-| `support_no_align` | Support prototype alignment & CE disabled | Support loss weight = 0; all branches participate |
-| `contrastive_disabled` | Contrastive objective fully disabled | Branches disabled; loss weight fixed to 0 |
-| `baseline_tspn` | No episodic sampling, no contrastive loss | Few-shot disabled, branches disabled |
-
-Contrastive loss weights sweep over `{0.2, 0.3}` for all variants where `requires_weight_sweep=True`.
-
-## Running Experiments
-
-### Python module
+1. Start from `configs/demo/X_Single_DG/TSPN_FewShot/shared.yaml`. The `model.contrastive` section now exposes:
+   - `physical_projector.indicator_dim`, `simplex_eps`, `spd_rank`, `tau_*`.
+   - `reg_weight` controlling `λ_reg‖L‖²_F`.
+2. Enable PCC by importing `configs/demo/X_Single_DG/TSPN_FewShot/contrastive.yaml` (or the scenario-specific variants like `JUST.yaml`, `ottawa.yaml`). Each file specifies:
+   - `task.contrastive.loss_weight` → `λ_pcc`.
+   - `task.contrastive.reg_weight` → projector regulariser weight.
+   - `task.contrastive.pcc` → positive/negative weighting, cosine filter threshold, and physics augmentation knobs.
+3. Launch experiments with the standard entrypoint, e.g.:
 
 ```bash
-python -m script.hparam_eval.tspn_contrastive_ablation \
-  --datasets hust sdust \
-  --variants contrastive_full support_no_align \
-  --output-root save/contrastive_ablation \
-  --max-parallel 2 \
-  --device-pool 0,1
+python main.py --config configs/demo/X_Single_DG/TSPN_FewShot/contrastive.yaml \
+  --pipeline Pipeline_02_pretrain_fewshot
 ```
 
-Key flags:
+### Episodic Guidance
 
-- `--datasets`: subset of `{hust, sdust}` (default: both)
-- `--variants`: optional variant filter (default: all)
-- `--notes`: appended to `environment.notes`
-- Standard device / pipeline options match the previous runner
+- The sampler continues to use class/domain selections declared in `task.few_shot` but all contrastive supervision now occurs within a single PCC loss.
+- Negatives come exclusively from inter-class support/query samples until physics-violating augmentations are re-enabled.
 
-### Shell wrapper
+## Legacy References
 
-```bash
-CONTRASTIVE_ABLATION_DATASETS="hust sdust" \
-CONTRASTIVE_ABLATION_VARIANTS="contrastive_full contrastive_qs_only" \
-script/hparam_eval/run_tspn_contrastive_ablation.sh --max-parallel 2
-```
+- Legacy configs/shell helpers: `archive/legacy_tspn_contrastive_ablation/`
+- Former documentation of ss/sq/qq branches: `docs/tspn_loss_composition.md` (see “Legacy Branches” appendix).
 
-Environment variables:
-
-- `CONTRASTIVE_ABLATION_DATASETS` – whitespace separated dataset list
-- `CONTRASTIVE_ABLATION_VARIANTS` – optional variant list
-- `CONTRASTIVE_ABLATION_DEVICES`, `CONTRASTIVE_ABLATION_DEVICE_POOL` – GPU bindings
-- `CONTRASTIVE_ABLATION_TIMEOUT`, `CONTRASTIVE_ABLATION_PIPELINE`, `CONTRASTIVE_ABLATION_NOTES` mirror CLI flags
-
-### test
-```bash
-CONTRASTIVE_ABLATION_DEVICE_POOL="1" bash script/hparam_eval/run_tspn_contrastive_ablation.sh --max-parallel 1
-CONTRASTIVE_ABLATION_DEVICE_POOL=1 CONTRASTIVE_ABLATION_RESUME_FAILED=1 bash script/hparam_eval/run_tspn_contrastive_ablation.sh --max-parallel 1
-```
-
-## Outputs
-
-Structure under `save/contrastive_ablation/`:
-
-- `<dataset>/<run_name>/train.log`
-- `<dataset>/<run_name>/run_summary.json`
-- `<dataset>/<run_name>/resolved_config.yaml`
-- `ablation_summary.csv` / `ablation_summary.md` (dataset column distinguishes runs)
-
-`ablation_summary.csv` now contains:
-
-- `dataset`, `variant`, runtime, status
-- Metadata columns prefixed with `meta_` (domain label, branch participation, loss weight)
-- Accuracy columns auto-detected (`test_acc`, `test_acc_HUST`, `test_acc_SDUST`, …)
-
-## Accuracy Aggregation
-
-Use the shared summariser to consolidate historical runs without relaunching experiments:
-
-```bash
-python script/hparam_eval/tspn_resummarise.py \
-  --root save/contrastive_ablation \
-  --output save/contrastive_ablation/tspn_resummary.csv \
-  --markdown save/contrastive_ablation/tspn_resummary.md
-```
-
-`tspn_resummarise.py` scans every `iter_*` directory, records the effective `test_acc*` metric for each iteration, and preserves the hyperparameter columns (`loss_weight`, episodic sampler settings, seed) needed to compare the new ss-only / qq-only ablations with the baseline variants.
-
-## Migration Notes
-
-- Existing HUST-only configs remain available; new configs live in `configs/experiments/tspn_contrastive_ablation`.
-- Branch toggles now specify `enabled` vs `participates`. The trainer computes weights from positive pairs before masking contributions, keeping comparative analysis consistent.
-- Support-alignment ablation sets `support_loss.loss_weight = 0` to ensure the support CE term is removed alongside prototype alignment.
+These assets are preserved solely for historical comparison and should not be used for new experiments.

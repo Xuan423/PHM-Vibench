@@ -2,13 +2,13 @@
 
 environment:
   WANDB_MODE: "disabled"
-  VBENCH_HOME: "/home/lab617/xuanli/work/PHM-Vibench"
-  PYTHONPATH: "/home/lab617/miniconda3/envs/xuanli_phmbench"
-  PHMBench: "/home/lab617/xuanli/work/PHM-Vibench"
+  VBENCH_HOME: "/home/xuanli/work/PHM-Vibench"
+  PYTHONPATH: "/home/xuanli/miniforge/envs/phmbench"
+  PHMBench: "/home/xuanli/work/PHM-Vibench"
   seed: 17
 
 data:
-  data_dir: "/home/lab617/xuanli/dataset/PHMbench_rawdata"
+  data_dir: "/mnt/e/dataset/PHMbench-raw_data"
   metadata_file: "metadata_9_29.xlsx"
   batch_size: &tspn_shared_bs 64
   num_workers: 4
@@ -43,11 +43,21 @@ model:
   f_b_sigma: 0.1
   contrastive:
     enabled: false
-    projection_hidden: 512
-    projection_dim: 128
-    temperature: 0.1
+    temperature: 0.2
     loss_weight: 0.0
-    mode: "supervised"
+    reg_weight: 0.0
+    physical_projector:
+      enabled: true
+      indicator_dim: 64
+      init: "uniform"
+      simplex_eps: 1.0e-6
+      spd_rank: 4
+      tau_init: 1.0
+      tau_min: 1.0e-4
+      prior:
+        path: null
+        format: "npy"
+        temperature: 1.0
 
 task:
   name: "classification"
@@ -83,11 +93,24 @@ task:
     query_per_class: 15
     preserve_labels: true
     episodes_per_epoch: 200
-    format: "flat"
-  explainability:
-    enabled: false
-    output_subdir: "explainability"
-    device: "auto"
+    format: "episode"
+  contrastive:
+    temperature: 0.2
+    loss_weight: 0.0
+    reg_weight: 0.0
+    pcc:
+      lambda_pos: 1.0
+      lambda_neg: 1.0
+      cos_threshold_deg: 25.0
+      augmentation:
+        enable_phi: true
+        time_shift_pct: 0.05
+        amplitude_min: 0.8
+        amplitude_max: 1.2
+        stretch_min: 0.95
+        stretch_max: 1.05
+        ripple_db: 2.0
+        views_per_sample: 2
 
 trainer:
   name: "Default_trainer"

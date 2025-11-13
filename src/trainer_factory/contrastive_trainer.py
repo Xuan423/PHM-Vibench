@@ -199,8 +199,7 @@ def _build_summary_payload(args_t, args_d) -> Dict[str, Any]:
             (
                 'loss_weight',
                 'temperature',
-                'mode',
-                'normalize_embeddings',
+                'reg_weight',
             ),
         )
 
@@ -212,11 +211,9 @@ def _build_summary_payload(args_t, args_d) -> Dict[str, Any]:
                 model_contrastive,
                 (
                     'enabled',
-                    'projection_hidden',
-                    'projection_dim',
                     'temperature',
                     'loss_weight',
-                    'mode',
+                    'reg_weight',
                 ),
             )
 
