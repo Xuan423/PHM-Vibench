@@ -8,16 +8,18 @@ import warnings
 from collections import defaultdict
 from dataclasses import dataclass
 from queue import Empty, Queue
-from typing import Dict, Iterator, List, Optional, Tuple
+from typing import Dict, Iterator, List, Optional, Tuple, Union
 from torch.utils.data import Sampler
 
 from ..dataset_task.Dataset_cluster import IdIncludedDataset
+from ..batch_sync import ChunkedBatchIndex, EpisodeChunkTracker
 
 
 @dataclass
 class EpisodeChunkSpec:
-    indices: List[int]
+    indices: List[Union[int, ChunkedBatchIndex]]
     layout: EpisodeLayout
+    chunk_uid: Optional[str] = None
 
 
 @dataclass
@@ -40,6 +42,7 @@ class EpisodeLayout:
     episode_id: Optional[str] = None
     chunk_index: int = 0
     chunk_count: int = 1
+    chunk_uid: Optional[str] = None
 
 
 class FewShotDGSampler(Sampler[List[int]]):
@@ -60,6 +63,7 @@ class FewShotDGSampler(Sampler[List[int]]):
         mode: str = "train",
         default_seed: int = 0,
         iteration_batch_size: Optional[int] = None,
+        chunk_tracker: Optional[EpisodeChunkTracker] = None,
     ) -> None:
         if not isinstance(dataset, IdIncludedDataset):
             raise ValueError("FewShotDGSampler expects an IdIncludedDataset instance")
@@ -72,6 +76,8 @@ class FewShotDGSampler(Sampler[List[int]]):
         self.mode = mode
         self.cfg = few_shot_cfg
         self.iteration_batch_size = max(int(iteration_batch_size or 0), 0)
+        self._chunk_tracker = chunk_tracker
+        self.chunk_sync_timeout_ms = max(int(getattr(few_shot_cfg, "chunk_sync_timeout_ms", 2000)), 0)
 
         self.system_key = getattr(few_shot_cfg, "system_key", "Dataset_id")
         self.domain_key = getattr(few_shot_cfg, "domain_key", "Domain_id")
@@ -310,13 +316,18 @@ class FewShotDGSampler(Sampler[List[int]]):
                     episode_id=episode_id,
                 )
                 for spec in chunk_specs:
-                    self._layout_queue.put(spec.layout)
+                    if self._layout_queue is not None:
+                        self._layout_queue.put(spec.layout)
                     yield spec.indices
 
     @property
     def layout_queue(self):
         """Expose the multiprocessing queue carrying episode layouts."""
         return self._layout_queue
+
+    @property
+    def chunk_tracker(self) -> Optional[EpisodeChunkTracker]:
+        return self._chunk_tracker
 
     def _draw_indices_for_label(
         self,
@@ -431,9 +442,11 @@ class FewShotDGSampler(Sampler[List[int]]):
             )
             return [EpisodeChunkSpec(indices=episode_indices, layout=layout)]
 
-        chunk_count = len(chunk_maps)
+        emitted_maps = chunk_maps
+
+        chunk_count = len(emitted_maps)
         specs: List[EpisodeChunkSpec] = []
-        for chunk_index, chunk_map in enumerate(chunk_maps):
+        for chunk_index, chunk_map in enumerate(emitted_maps):
             chunk_indices: List[int] = []
             layout_labels: List[EpisodeLabelLayout] = []
             cursor = 0
@@ -476,6 +489,21 @@ class FewShotDGSampler(Sampler[List[int]]):
                 chunk_index=chunk_index,
                 chunk_count=chunk_count,
             )
-            specs.append(EpisodeChunkSpec(indices=chunk_indices, layout=layout))
+            chunk_uid: Optional[str] = None
+            if self._chunk_tracker is not None:
+                handle = self._chunk_tracker.register_layout(layout)
+                chunk_uid = handle.chunk_uid
+                layout.chunk_uid = chunk_uid
+
+            wrapped_indices: List[Union[int, ChunkedBatchIndex]]
+            if chunk_uid:
+                wrapped_indices = [
+                    ChunkedBatchIndex(idx=sample_idx, chunk_uid=chunk_uid, chunk_seq=seq)
+                    for seq, sample_idx in enumerate(chunk_indices)
+                ]
+            else:
+                wrapped_indices = chunk_indices
+
+            specs.append(EpisodeChunkSpec(indices=wrapped_indices, layout=layout, chunk_uid=chunk_uid))
 
         return specs

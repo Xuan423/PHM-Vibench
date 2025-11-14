@@ -15,8 +15,11 @@ import copy
 import concurrent.futures
 from tqdm import tqdm  # 用于显示进度条
 from torch.utils.data import Dataset
+from typing import Any, Dict, Optional
+
 from .samplers.Sampler import GroupedIdBatchSampler, BalancedIdSampler
 from .batch import EpisodeCollate
+from .batch_sync import EpisodeChunkTracker
 from .data_utils import smart_read_csv, MetadataAccessor, download_data
 from .samplers.Get_sampler import Get_sampler
 from .ID.Id_searcher import search_ids_for_task, search_target_dataset_metadata
@@ -50,6 +53,7 @@ class data_factory:
         self.data = self._init_data(args_data)
         # dataset and dataloader
         self.train_dataset, self.val_dataset,self.test_dataset = self._init_dataset()
+        self._chunk_trackers: Dict[str, Optional[EpisodeChunkTracker]] = {}
         self.train_loader, self.val_loader, self.test_loader = self._init_dataloader()
 
     def _init_metadata(self, args_data):
@@ -318,7 +322,7 @@ class data_factory:
         return self.train_val_ids, self.test_ids
         
 
-    def get_sampler(self, mode='train'):
+    def get_sampler(self, mode='train', chunk_tracker: Optional[EpisodeChunkTracker] = None):
         if mode == 'train':
             dataset = self.train_dataset
         elif mode == 'val':
@@ -327,9 +331,14 @@ class data_factory:
             dataset = self.test_dataset
         else:
             raise ValueError(f"Unknown mode for get_sampler: {mode}")
-        return Get_sampler(self.args_task, self.args_data, dataset, mode)
+        return Get_sampler(self.args_task, self.args_data, dataset, mode, chunk_tracker=chunk_tracker)
 
-    def _resolve_collate(self, sampler):
+    def _resolve_collate(
+        self,
+        sampler,
+        *,
+        chunk_tracker: Optional[EpisodeChunkTracker] = None,
+    ):
         few_shot_cfg = getattr(self.args_task, 'few_shot', None)
         if few_shot_cfg is None or not getattr(few_shot_cfg, 'enabled', False):
             return None
@@ -342,53 +351,84 @@ class data_factory:
         if layout_queue is None:
             return None
 
-        return EpisodeCollate(layout_queue=layout_queue, metadata=self.metadata)
+        chunk_timeout_ms = getattr(few_shot_cfg, 'chunk_sync_timeout_ms', 2000)
+
+        return EpisodeCollate(
+            layout_queue=layout_queue,
+            metadata=self.metadata,
+            layout_tracker=chunk_tracker,
+            chunk_timeout_ms=chunk_timeout_ms,
+        )
 
     def _init_dataloader(self):
-        train_sampler = self.get_sampler(mode='train')
-        val_sampler = self.get_sampler(mode='val')
-        test_sampler = self.get_sampler(mode='test')
-
         # 强制禁用persistent_workers以防止内存累积
         persistent_workers = False
         # 限制num_workers数量以减少内存使用
         num_workers = min(self.args_data.num_workers, 4)
-
-        train_collate = self._resolve_collate(train_sampler)
-        val_collate = self._resolve_collate(val_sampler)
-        test_collate = self._resolve_collate(test_sampler)
-
         prefetch_kwargs = {"prefetch_factor": 1} if num_workers > 0 else {}
 
-        self.train_loader = DataLoader(
-            self.train_dataset,
-            batch_sampler=train_sampler,
+        self.train_loader = self._build_loader(
+            dataset=self.train_dataset,
+            mode="train",
             num_workers=num_workers,
-            pin_memory=False,
             persistent_workers=persistent_workers,
-            collate_fn=train_collate,
-            **prefetch_kwargs,
+            prefetch_kwargs=prefetch_kwargs,
         )
-        self.val_loader = DataLoader(
-            self.val_dataset,
-            batch_sampler=val_sampler,
+        self.val_loader = self._build_loader(
+            dataset=self.val_dataset,
+            mode="val",
             num_workers=num_workers,
-            pin_memory=False,
             persistent_workers=persistent_workers,
-            collate_fn=val_collate,
-            **prefetch_kwargs,
+            prefetch_kwargs=prefetch_kwargs,
         )
-        self.test_loader = DataLoader(
-            self.test_dataset,
-            batch_sampler=test_sampler,
+        self.test_loader = self._build_loader(
+            dataset=self.test_dataset,
+            mode="test",
             num_workers=num_workers,
-            pin_memory=False,
             persistent_workers=persistent_workers,
-            collate_fn=test_collate,
-            **prefetch_kwargs,
+            prefetch_kwargs=prefetch_kwargs,
         )
 
         return self.train_loader, self.val_loader, self.test_loader
+
+    def _maybe_build_chunk_tracker(self, mode: str) -> Optional[EpisodeChunkTracker]:
+        few_shot_cfg = getattr(self.args_task, 'few_shot', None)
+        if few_shot_cfg is None or not getattr(few_shot_cfg, 'enabled', False):
+            return None
+        format_value = getattr(few_shot_cfg, 'format', '')
+        if not isinstance(format_value, str) or format_value.lower() != 'episode':
+            return None
+        ttl_seconds = float(getattr(few_shot_cfg, 'chunk_layout_ttl_s', 600.0))
+        poll_ms = float(getattr(few_shot_cfg, 'chunk_poll_interval_ms', 2.0))
+        timeout_ms = int(getattr(few_shot_cfg, 'chunk_sync_timeout_ms', 2000))
+        return EpisodeChunkTracker(
+            max_stale_seconds=ttl_seconds,
+            claim_poll_interval_ms=poll_ms,
+            default_timeout_ms=timeout_ms,
+        )
+
+    def _build_loader(
+        self,
+        *,
+        dataset,
+        mode: str,
+        num_workers: int,
+        persistent_workers: bool,
+        prefetch_kwargs: Dict[str, Any],
+    ) -> DataLoader:
+        tracker = self._maybe_build_chunk_tracker(mode)
+        self._chunk_trackers[mode] = tracker
+        sampler = self.get_sampler(mode=mode, chunk_tracker=tracker)
+        collate_fn = self._resolve_collate(sampler, chunk_tracker=tracker)
+        return DataLoader(
+            dataset,
+            batch_sampler=sampler,
+            num_workers=num_workers,
+            pin_memory=False,
+            persistent_workers=persistent_workers,
+            collate_fn=collate_fn,
+            **prefetch_kwargs,
+        )
 
     def get_dataset(self, mode = "test"):
         """获取指定ID的数据集

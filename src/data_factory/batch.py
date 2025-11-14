@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import logging
+import time
 import warnings
 from dataclasses import dataclass, field
 from queue import Empty
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import torch
 from torch.utils.data._utils.collate import default_collate
 
+from .batch_sync import ChunkHandle, EpisodeChunkTracker
 from .samplers.FewShotDGSampler import EpisodeLayout
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
@@ -44,6 +49,7 @@ class EpisodeBatch:
     episode_id: Optional[str] = None
     chunk_index: int = 0
     chunk_count: int = 1
+    chunk_uid: Optional[str] = None
 
     @property
     def is_first_chunk(self) -> bool:
@@ -57,26 +63,36 @@ class EpisodeBatch:
 class EpisodeCollate:
     """Collate function that materialises support/query tensors per episode."""
 
-    def __init__(self, *, layout_queue: Optional[Any] = None, metadata: Optional[Any] = None) -> None:
+    def __init__(
+        self,
+        *,
+        layout_queue: Optional[Any] = None,
+        metadata: Optional[Any] = None,
+        layout_tracker: Optional[EpisodeChunkTracker] = None,
+        chunk_timeout_ms: Optional[int] = None,
+        logger: Optional[logging.Logger] = None,
+    ) -> None:
         self._layout_queue = layout_queue
         self.metadata = metadata
+        self._layout_tracker = layout_tracker
+        self._chunk_timeout_ms = chunk_timeout_ms
+        self._logger = logger or LOGGER
 
     # ------------------------------------------------------------------
     def __call__(self, samples: Sequence[Dict[str, Any]]) -> Any:
-        layout: Optional[EpisodeLayout] = None
-        if self._layout_queue is not None:
-            try:
-                layout = self._layout_queue.get_nowait()
-            except Empty:
-                layout = None
+        chunk_uid = self._extract_chunk_uid(samples)
+        layout, handle = self._resolve_layout(chunk_uid)
+
         if layout is None:
             return default_collate(samples)
         if layout.size != len(samples):
-            warnings.warn(
-                "Episode layout size mismatch; falling back to default collate.",
-                RuntimeWarning,
+            message = (
+                "Episode layout size mismatch detected "
+                f"(chunk_uid={chunk_uid or getattr(layout, 'chunk_uid', 'n/a')}, "
+                f"expected={layout.size}, received={len(samples)})"
             )
-            return default_collate(samples)
+            self._logger.error(message)
+            raise RuntimeError(message)
 
         flat_batch = default_collate(samples)
         if not isinstance(flat_batch, dict) or "x" not in flat_batch or "y" not in flat_batch:
@@ -147,7 +163,7 @@ class EpisodeCollate:
         query_x = self._stack_or_empty(query_chunks, x_tensor)
         query_y = self._stack_or_empty(query_y_chunks, y_tensor)
 
-        return EpisodeBatch(
+        batch = EpisodeBatch(
             support_x=support_x,
             support_y=support_y,
             query_x=query_x,
@@ -160,7 +176,13 @@ class EpisodeCollate:
             episode_id=getattr(layout, "episode_id", None),
             chunk_index=getattr(layout, "chunk_index", 0),
             chunk_count=getattr(layout, "chunk_count", 1),
+            chunk_uid=chunk_uid or getattr(layout, "chunk_uid", None),
         )
+        if batch.chunk_uid:
+            batch.flat_batch.setdefault("chunk_uid", batch.chunk_uid)
+        if handle is not None and self._layout_tracker is not None:
+            self._layout_tracker.report_consumed(handle.chunk_uid)
+        return batch
 
     # ------------------------------------------------------------------
     @staticmethod
@@ -172,6 +194,56 @@ class EpisodeCollate:
         if len(chunks) == 1:
             return chunks[0]
         return torch.cat(chunks, dim=0)
+
+    # ------------------------------------------------------------------
+    def _resolve_layout(
+        self,
+        chunk_uid: Optional[str],
+    ) -> Tuple[Optional[EpisodeLayout], Optional[ChunkHandle]]:
+        start = time.perf_counter()
+        handle: Optional[ChunkHandle] = None
+        layout: Optional[EpisodeLayout] = None
+        if self._layout_tracker is not None and chunk_uid:
+            handle = self._layout_tracker.claim_layout(chunk_uid, timeout_ms=self._chunk_timeout_ms)
+            if handle is None:
+                message = f"Timed out waiting for chunk layout (chunk_uid={chunk_uid})"
+                self._logger.error(message)
+                raise RuntimeError(message)
+            layout = handle.layout
+        else:
+            layout = self._pop_layout_from_queue()
+
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+        if chunk_uid and layout is not None:
+            self._logger.debug(
+                "Resolved chunk %s layout in %.3f ms (tracker=%s)",
+                chunk_uid,
+                elapsed_ms,
+                bool(self._layout_tracker),
+            )
+        return layout, handle
+
+    def _pop_layout_from_queue(self) -> Optional[EpisodeLayout]:
+        if self._layout_queue is None:
+            return None
+        try:
+            return self._layout_queue.get_nowait()
+        except Empty:
+            return None
+
+    @staticmethod
+    def _extract_chunk_uid(samples: Sequence[Dict[str, Any]]) -> Optional[str]:
+        chunk_uids = {
+            sample.get("__chunk_uid")
+            for sample in samples
+            if isinstance(sample, dict) and sample.get("__chunk_uid")
+        }
+        chunk_uids.discard(None)
+        if not chunk_uids:
+            return None
+        if len(chunk_uids) > 1:
+            raise RuntimeError(f"EpisodeCollate detected mixed chunk_uids: {sorted(chunk_uids)}")
+        return next(iter(chunk_uids))
 
 
 __all__ = [

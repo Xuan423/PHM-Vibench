@@ -42,7 +42,7 @@ def _get_cddg_sampler(args_data, dataset, mode):
         raise ValueError(f"Unknown mode for CDDG sampler: {mode}")
     return sampler
 
-def _get_dg_sampler(args_task, args_data, dataset, mode):
+def _get_dg_sampler(args_task, args_data, dataset, mode, chunk_tracker=None):
     few_shot_cfg = getattr(args_task, 'few_shot', None)
     if few_shot_cfg and getattr(few_shot_cfg, 'enabled', False):
         sampler = FewShotDGSampler(
@@ -55,6 +55,7 @@ def _get_dg_sampler(args_task, args_data, dataset, mode):
                 'batch_size',
                 getattr(args_data, 'batch_size', 0),
             ),
+            chunk_tracker=chunk_tracker,
         )
     elif mode == 'train':
         sampler = Same_system_Sampler(
@@ -94,7 +95,7 @@ def _get_pretrain_sampler(args_data, dataset, mode):
     return sampler
 
 
-def Get_sampler(args_task, args_data, dataset, mode='train'):
+def Get_sampler(args_task, args_data, dataset, mode='train', chunk_tracker=None):
     """
     Initializes and returns a sampler based on the task type and mode.
 
@@ -119,7 +120,7 @@ def Get_sampler(args_task, args_data, dataset, mode='train'):
     elif args_task.type == 'CDDG':
         sampler = _get_cddg_sampler(args_data, dataset, mode)
     elif args_task.type == 'DG':
-        sampler = _get_dg_sampler(args_task, args_data, dataset, mode)
+        sampler = _get_dg_sampler(args_task, args_data, dataset, mode, chunk_tracker=chunk_tracker)
     elif args_task.type == 'multi_task':
         # Multi-task learning uses standard batch sampling
         sampler = _get_pretrain_sampler(args_data, dataset, mode)  # Reuse pretrain sampler

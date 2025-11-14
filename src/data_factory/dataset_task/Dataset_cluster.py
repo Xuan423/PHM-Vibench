@@ -1,5 +1,9 @@
+from typing import Optional
+
 import torch
 from torch.utils.data import Dataset
+
+from ..batch_sync import ChunkedBatchIndex
 # Reference:UniTS
 
 
@@ -68,6 +72,11 @@ class IdIncludedDataset(Dataset):
             tuple: (str, tuple), 即 (id, (x, y))
                    其中 x 是特征数据, y 是标签。
         """
+        chunk_meta: Optional[ChunkedBatchIndex] = None
+        if isinstance(global_idx, ChunkedBatchIndex):
+            chunk_meta = global_idx
+            global_idx = global_idx.idx
+
         if global_idx < 0 or global_idx >= self._total_samples:
             raise IndexError(f"全局索引 {global_idx} 超出范围 (总样本数: {self._total_samples})")
 
@@ -82,4 +91,7 @@ class IdIncludedDataset(Dataset):
         out = original_dataset_instance[window_id_in_original_dataset] # may be (x, y) or (x, y, z)
 
         out.update({"file_id": file_id}) # 添加 id 信息
+        if chunk_meta and chunk_meta.chunk_uid:
+            out["__chunk_uid"] = chunk_meta.chunk_uid
+            out["__chunk_seq"] = chunk_meta.chunk_seq
         return  out

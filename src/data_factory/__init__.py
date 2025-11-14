@@ -2,6 +2,7 @@
 
 from typing import Any
 
+from .batch_sync import ChunkedBatchIndex, EpisodeChunkTracker
 from .data_factory import (
     DATA_FACTORY_REGISTRY,
     data_factory,
@@ -63,4 +64,6 @@ __all__ = [
     "DATA_FACTORY_REGISTRY",
     "IdIncludedDataset",
     "id_data_factory",
+    "EpisodeChunkTracker",
+    "ChunkedBatchIndex",
 ]
