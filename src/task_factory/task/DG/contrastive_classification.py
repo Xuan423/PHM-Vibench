@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 import warnings
 
 import torch
+import torch.nn as nn
 
 from ...Default_task import Default_task
 from ....data_factory.batch import EpisodeBatch
@@ -84,6 +85,16 @@ class task(Default_task):
         self.pcc_builder = PCCBatchBuilder(builder_config, self._encode_for_pcc)
         self.pcc_loss = PhysicsConditionedContrastiveLoss(PCCLossConfig(temperature=self.temperature))
 
+        anchor_cfg = getattr(task_cfg, "weight_anchor", None)
+        self.weight_anchor = {
+            "enabled": bool(getattr(anchor_cfg, "enabled", False)) if anchor_cfg else False,
+            "lambda": float(getattr(anchor_cfg, "lambda", 0.0)) if anchor_cfg else 0.0,
+            "modules": list(getattr(anchor_cfg, "modules", [])) if anchor_cfg else [],
+        }
+        self._anchor_refs: List[Tuple[nn.Parameter, torch.Tensor]] = []
+        if self.weight_anchor["enabled"] and self.weight_anchor["lambda"] > 0.0:
+            self._init_weight_anchor()
+
     # ------------------------------------------------------------------
     # Overrides
     # ------------------------------------------------------------------
@@ -155,6 +166,11 @@ class task(Default_task):
             metric_reg_loss = metric_reg_value * self.lambda_reg
             step_metrics[f"{stage}_metric_reg_weighted"] = metric_reg_loss
             total_loss = total_loss + metric_reg_loss
+
+        anchor_loss = self._weight_anchor_loss(logits.device)
+        if anchor_loss is not None:
+            total_loss = total_loss + anchor_loss
+            step_metrics[f"{stage}_anchor_loss"] = anchor_loss.detach()
 
         zero = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
         step_metrics[f"{stage}_pcc_loss"] = zero
@@ -244,6 +260,11 @@ class task(Default_task):
             step_metrics[f"{stage}_metric_reg_weighted"] = metric_reg_loss
             total_loss = total_loss + metric_reg_loss
 
+        anchor_loss = self._weight_anchor_loss(logits.device)
+        if anchor_loss is not None:
+            total_loss = total_loss + anchor_loss
+            step_metrics[f"{stage}_anchor_loss"] = anchor_loss.detach()
+
         metric = getattr(self.network, "spd_metric", None)
         if metric is None:
             raise RuntimeError("SPD metric is required for PCC loss but not found on network.")
@@ -292,3 +313,30 @@ class task(Default_task):
             else:
                 normalised.append(fid)
         return normalised
+
+    def _init_weight_anchor(self) -> None:
+        modules = self.weight_anchor.get("modules") or ["physics_projector", "spd_metric"]
+        anchor_pairs: List[Tuple[torch.nn.Parameter, torch.Tensor]] = []
+        for name in modules:
+            module = getattr(self.network, name, None)
+            if module is None:
+                continue
+            for param in module.parameters():
+                if not param.requires_grad:
+                    continue
+                anchor_pairs.append((param, param.detach().clone()))
+        self._anchor_refs = anchor_pairs
+
+    def _weight_anchor_loss(self, device: torch.device) -> Optional[torch.Tensor]:
+        if not self._anchor_refs or not self.weight_anchor.get("enabled"):
+            return None
+        lam = self.weight_anchor.get("lambda", 0.0)
+        if lam <= 0:
+            return None
+        loss = torch.zeros(1, device=device)
+        for param, ref in self._anchor_refs:
+            ref_tensor = ref
+            if ref_tensor.device != param.device:
+                ref_tensor = ref_tensor.to(param.device)
+            loss = loss + torch.sum((param - ref_tensor) ** 2)
+        return loss * lam

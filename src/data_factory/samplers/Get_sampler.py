@@ -45,6 +45,12 @@ def _get_cddg_sampler(args_data, dataset, mode):
 def _get_dg_sampler(args_task, args_data, dataset, mode, chunk_tracker=None):
     few_shot_cfg = getattr(args_task, 'few_shot', None)
     if few_shot_cfg and getattr(few_shot_cfg, 'enabled', False):
+        stage_mode = str(getattr(args_task, 'stage_mode', '') or '').lower()
+        if stage_mode == "stage2":
+            if hasattr(few_shot_cfg, "warmup_flat_epochs"):
+                raise ValueError(
+                    "Stage 2 no longer supports `warmup_flat_epochs`; configure warmup via `task.warmup`."
+                )
         sampler = FewShotDGSampler(
             dataset=dataset,
             few_shot_cfg=few_shot_cfg,
@@ -56,6 +62,7 @@ def _get_dg_sampler(args_task, args_data, dataset, mode, chunk_tracker=None):
                 getattr(args_data, 'batch_size', 0),
             ),
             chunk_tracker=chunk_tracker,
+            stage_mode=stage_mode or None,
         )
     elif mode == 'train':
         sampler = Same_system_Sampler(

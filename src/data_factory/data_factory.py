@@ -343,21 +343,14 @@ class data_factory:
         if few_shot_cfg is None or not getattr(few_shot_cfg, 'enabled', False):
             return None
 
-        format_value = getattr(few_shot_cfg, 'format', '')
-        if not isinstance(format_value, str) or format_value.lower() != 'episode':
-            return None
-
         layout_queue = getattr(sampler, 'layout_queue', None) if sampler is not None else None
         if layout_queue is None:
             return None
-
-        chunk_timeout_ms = getattr(few_shot_cfg, 'chunk_sync_timeout_ms', 2000)
 
         return EpisodeCollate(
             layout_queue=layout_queue,
             metadata=self.metadata,
             layout_tracker=chunk_tracker,
-            chunk_timeout_ms=chunk_timeout_ms,
         )
 
     def _init_dataloader(self):
@@ -365,6 +358,8 @@ class data_factory:
         persistent_workers = False
         # 限制num_workers数量以减少内存使用
         num_workers = min(self.args_data.num_workers, 4)
+        if str(getattr(self.args_task, "stage_mode", "")).lower() == "stage2":
+            num_workers = min(num_workers, 2)
         prefetch_kwargs = {"prefetch_factor": 1} if num_workers > 0 else {}
 
         self.train_loader = self._build_loader(
@@ -395,17 +390,7 @@ class data_factory:
         few_shot_cfg = getattr(self.args_task, 'few_shot', None)
         if few_shot_cfg is None or not getattr(few_shot_cfg, 'enabled', False):
             return None
-        format_value = getattr(few_shot_cfg, 'format', '')
-        if not isinstance(format_value, str) or format_value.lower() != 'episode':
-            return None
-        ttl_seconds = float(getattr(few_shot_cfg, 'chunk_layout_ttl_s', 600.0))
-        poll_ms = float(getattr(few_shot_cfg, 'chunk_poll_interval_ms', 2.0))
-        timeout_ms = int(getattr(few_shot_cfg, 'chunk_sync_timeout_ms', 2000))
-        return EpisodeChunkTracker(
-            max_stale_seconds=ttl_seconds,
-            claim_poll_interval_ms=poll_ms,
-            default_timeout_ms=timeout_ms,
-        )
+        return EpisodeChunkTracker()
 
     def _build_loader(
         self,

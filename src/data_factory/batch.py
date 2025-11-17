@@ -69,13 +69,11 @@ class EpisodeCollate:
         layout_queue: Optional[Any] = None,
         metadata: Optional[Any] = None,
         layout_tracker: Optional[EpisodeChunkTracker] = None,
-        chunk_timeout_ms: Optional[int] = None,
         logger: Optional[logging.Logger] = None,
     ) -> None:
         self._layout_queue = layout_queue
         self.metadata = metadata
         self._layout_tracker = layout_tracker
-        self._chunk_timeout_ms = chunk_timeout_ms
         self._logger = logger or LOGGER
 
     # ------------------------------------------------------------------
@@ -179,7 +177,10 @@ class EpisodeCollate:
             chunk_uid=chunk_uid or getattr(layout, "chunk_uid", None),
         )
         if batch.chunk_uid:
-            batch.flat_batch.setdefault("chunk_uid", batch.chunk_uid)
+            batch.flat_batch["chunk_uid"] = batch.chunk_uid
+            batch.flat_batch["__chunk_uid"] = batch.chunk_uid
+        if batch.episode_id:
+            batch.flat_batch["episode_id"] = batch.episode_id
         if handle is not None and self._layout_tracker is not None:
             self._layout_tracker.report_consumed(handle.chunk_uid)
         return batch
@@ -204,7 +205,7 @@ class EpisodeCollate:
         handle: Optional[ChunkHandle] = None
         layout: Optional[EpisodeLayout] = None
         if self._layout_tracker is not None and chunk_uid:
-            handle = self._layout_tracker.claim_layout(chunk_uid, timeout_ms=self._chunk_timeout_ms)
+            handle = self._layout_tracker.claim_layout(chunk_uid)
             if handle is None:
                 message = f"Timed out waiting for chunk layout (chunk_uid={chunk_uid})"
                 self._logger.error(message)

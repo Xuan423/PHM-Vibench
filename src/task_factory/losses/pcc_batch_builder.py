@@ -28,6 +28,8 @@ class PCCBuilderConfig:
     lambda_neg: float = 1.0
     cos_threshold_deg: float = 25.0
     augmentation: PCCAugmentationConfig = field(default_factory=PCCAugmentationConfig)
+    max_positive_support_samples: int = 0
+    max_negative_query_samples: int = 0
 
 
 class PCCBatchBuilder:
@@ -57,30 +59,65 @@ class PCCBatchBuilder:
 
         prototype_dict = self._build_prototypes(support_embeddings, support_labels)
 
+        pos_support_cache: Dict[int, torch.Tensor] = {}
+        neg_query_cache: Dict[int, torch.Tensor] = {}
+
         for idx, anchor in enumerate(query_embeddings):
             label_val = int(query_labels[idx].item())
             pos_chunks: List[torch.Tensor] = []
             neg_chunks: List[torch.Tensor] = []
-
-            if support_embeddings is not None and support_labels is not None and support_embeddings.size(0) > 0:
-                support_mask = support_labels == label_val
-                if support_mask.any():
-                    pos_chunks.append(support_embeddings[support_mask])
-                neg_mask = torch.logical_not(support_mask)
-                if neg_mask.any():
-                    neg_chunks.append(support_embeddings[neg_mask])
-
+            
             prototype_vec = prototype_dict.get(label_val)
             if prototype_vec is not None:
                 pos_chunks.append(prototype_vec.unsqueeze(0))
+            else:
+                raise RuntimeError(
+                    "PCC builder could not find a support prototype for label "
+                    f"{label_val}; ensure each class has support samples."
+                )
+
+            if self.config.max_positive_support_samples > 0:
+                cached = pos_support_cache.get(label_val)
+                if cached is None and support_embeddings is not None and support_labels is not None:
+                    support_mask = support_labels == label_val
+                    if support_mask.any():
+                        pos_support = support_embeddings[support_mask]
+                        if pos_support.size(0) > self.config.max_positive_support_samples:
+                            perm = torch.randperm(
+                                pos_support.size(0),
+                                device=pos_support.device,
+                            )[: self.config.max_positive_support_samples]
+                            pos_support = pos_support.index_select(0, perm)
+                        cached = pos_support
+                        pos_support_cache[label_val] = cached
+                if cached is not None and cached.numel() > 0:
+                    pos_chunks.append(cached)
 
             phi_views = phi_embeddings.get(idx)
             if phi_views is not None:
                 pos_chunks.append(phi_views)
 
-            query_mask = query_labels != label_val
-            if query_mask.any():
-                neg_chunks.append(query_embeddings[query_mask])
+            for other_label, other_proto in prototype_dict.items():
+                if other_label == label_val:
+                    continue
+                neg_chunks.append(other_proto.unsqueeze(0))
+
+            if self.config.max_negative_query_samples > 0:
+                cached_neg = neg_query_cache.get(label_val)
+                if cached_neg is None:
+                    query_mask = query_labels != label_val
+                    if query_mask.any():
+                        neg_query = query_embeddings[query_mask]
+                        if neg_query.size(0) > self.config.max_negative_query_samples:
+                            perm = torch.randperm(
+                                neg_query.size(0),
+                                device=neg_query.device,
+                            )[: self.config.max_negative_query_samples]
+                            neg_query = neg_query.index_select(0, perm)
+                        cached_neg = neg_query
+                        neg_query_cache[label_val] = cached_neg
+                if cached_neg is not None and cached_neg.numel() > 0:
+                    neg_chunks.append(cached_neg)
 
             if not pos_chunks:
                 raise RuntimeError(

@@ -63,7 +63,7 @@ task:
   name: "classification"
   type: 'DG'
   target_domain_id: [10]
-  source_domain_id: [0,2,4,6,8] # [0,1,2,3,4]
+  source_domain_id: [2,3,4] # [0,1,2,3,4]
   loss: "CE"
   metrics: ["acc"]
   target_system_id: [19]
@@ -92,7 +92,6 @@ task:
     support_per_class: 5
     query_per_class: 15
     preserve_labels: true
-    episodes_per_epoch: 200
     format: "episode"
   contrastive:
     temperature: 0.2

@@ -64,6 +64,7 @@ class FewShotDGSampler(Sampler[List[int]]):
         default_seed: int = 0,
         iteration_batch_size: Optional[int] = None,
         chunk_tracker: Optional[EpisodeChunkTracker] = None,
+        stage_mode: Optional[str] = None,
     ) -> None:
         if not isinstance(dataset, IdIncludedDataset):
             raise ValueError("FewShotDGSampler expects an IdIncludedDataset instance")
@@ -77,7 +78,7 @@ class FewShotDGSampler(Sampler[List[int]]):
         self.cfg = few_shot_cfg
         self.iteration_batch_size = max(int(iteration_batch_size or 0), 0)
         self._chunk_tracker = chunk_tracker
-        self.chunk_sync_timeout_ms = max(int(getattr(few_shot_cfg, "chunk_sync_timeout_ms", 2000)), 0)
+        self.stage_mode = stage_mode
 
         self.system_key = getattr(few_shot_cfg, "system_key", "Dataset_id")
         self.domain_key = getattr(few_shot_cfg, "domain_key", "Domain_id")
@@ -105,7 +106,11 @@ class FewShotDGSampler(Sampler[List[int]]):
         self.base_seed = int(base_seed) + mode_offset
         self.epoch = 0
 
-        self.episodes_per_epoch = max(int(getattr(few_shot_cfg, "episodes_per_epoch", 0)), 0)
+        requested_episodes = getattr(few_shot_cfg, "episodes_per_epoch", None)
+        self._user_requested_episodes = (
+            requested_episodes is not None and int(requested_episodes) > 0
+        )
+        self.episodes_per_epoch = max(int(requested_episodes or 0), 0)
 
         # Pre-compute sample pools indexed by (system, domain, label).
         self._indices_by_label: Dict[Tuple[str, str, str], List[int]] = defaultdict(list)
@@ -143,6 +148,9 @@ class FewShotDGSampler(Sampler[List[int]]):
             approx_samples = sum(len(v) for v in self._indices_by_label.values())
             episodes = approx_samples // shots_per_episode if shots_per_episode else 1
             self.episodes_per_epoch = max(episodes, total_domains)
+
+        if (self.stage_mode or "").lower() == "stage2" and not self._user_requested_episodes:
+            self.episodes_per_epoch = 1
 
         # Determine global fallback counts for support/query if needed.
         self._effective_support, self._effective_query = self._compute_effective_shots(requested_total)

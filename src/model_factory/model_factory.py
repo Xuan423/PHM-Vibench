@@ -77,13 +77,27 @@ def load_ckpt(model, ckpt_path):
     """
     if not os.path.exists(ckpt_path):
         raise FileNotFoundError(f"Checkpoint file {ckpt_path} does not exist.")
-    state_dict = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+    payload = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+    state_dict = payload.get("state_dict", payload)
     model_dict = model.state_dict()
     matched_dict = {}
     skipped = []
+    def _rewrite_key(key: str) -> str:
+        prefixes = ["network.", "model.", "module."]
+        for prefix in prefixes:
+            if key.startswith(prefix):
+                candidate = key[len(prefix):]
+                if candidate in model_dict:
+                    return candidate
+                key = candidate
+        return key
+
     for name, param in state_dict.items():
-        if name in model_dict:
-            matched_dict[name] = param
+        target_key = name
+        if target_key not in model_dict:
+            target_key = _rewrite_key(name)
+        if target_key in model_dict:
+            matched_dict[target_key] = param
         else:
             skipped.append((name, "not in model"))
     # 加载匹配的权重
@@ -94,4 +108,3 @@ def load_ckpt(model, ckpt_path):
         for name, model_sz in skipped:
             print(f"  {name}: checkpoint vs model {model_sz}")
     print(f"已加载匹配的权重: {ckpt_path}")
-

@@ -27,7 +27,6 @@ task:
   n_way: 5
   k_shot: 5
   q_query: 15
-  episodes_per_epoch: 100
   lr: 0.001
 
 trainer:

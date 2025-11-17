@@ -53,12 +53,7 @@ The data loading process follows a sequential workflow, orchestrated by the `dat
 
 ### Episode chunk synchronization
 
-Few-shot experimental configs that set `few_shot.enabled = true` and `few_shot.format = "episode"` now spin up an `EpisodeChunkTracker`. This tracker assigns a stable `chunk_uid` to every sampler emission, stores the corresponding `EpisodeLayout` in a lightweight SQLite store, and lets `EpisodeCollate` claim the exact layout no matter which DataLoader worker processes the chunk. Relevant knobs exposed under `few_shot`:
-
-- `chunk_sync_timeout_ms` – how long workers wait for a layout before failing fast (default 2000 ms)
-- `chunk_layout_ttl_s` – garbage-collection horizon for stale layouts (default 600 s)
-- `chunk_poll_interval_ms` – polling cadence for layout lookup (default 2 ms)
-This synchronization keeps support/query splits intact even when `num_workers > 1`, and surfaces descriptive errors instead of silently collapsing to the default collate path.
+Few-shot experimental configs that set `few_shot.enabled = true` spin up an `EpisodeChunkTracker`. This tracker assigns a stable `chunk_uid` to every sampler emission, stores the corresponding `EpisodeLayout` in a lightweight SQLite store, and lets `EpisodeCollate` claim the exact layout no matter which DataLoader worker processes the chunk. The tracker now relies entirely on its internal safety thresholds, so there are no user-facing timeout or polling knobs to tune. This keeps support/query splits intact even when `num_workers > 1`, and surfaces descriptive errors instead of silently collapsing to the default collate path.
 
 
 ---

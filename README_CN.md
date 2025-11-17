@@ -195,11 +195,27 @@ python main.py --config configs/demo/FewShot/protonet.yaml
 # Pretrain + Few-Shot 流水线
 python main.py --pipeline Pipeline_02_pretrain_fewshot --config_path configs/demo/Pretraining/pretrain.yaml --fs_config_path configs/demo/FewShot/protonet.yaml
 
+# TSPN 双阶段（Stage1 + Stage2，配置文件内置 pipeline）
+python main.py --config configs/demo/X_Single_DG/TSPN_FewShot/tspn_two_stage.yaml
+
 # Cross-dataset genealization
 python main.py --config configs/demo/Multiple_DG/CWRU_THU_using_ISFM.yaml
 
 # 所有数据集
 python main.py --config configs/demo/Multiple_DG/all.yaml
+```
+
+该配置已经写入了 `pipelines.tspn_two_stage.pipeline` 以及 Stage 2 的默认覆盖项，单命令即可执行。仍可通过下列参数临时覆盖：
+
+- `--two_stage_mode {stage1,stage2,both}`：可强制指定阶段（默认 `auto` 按 YAML 中 `enable_stage1` 自动决定）。
+- `--stage1_checkpoint <path>`：跳过 Stage 1 时指定已训练好的 checkpoint。
+- `--projector_log_dir <path>`：自定义 projector 轨迹的输出目录。
+
+你可以在 YAML 中直接配置 `pipeline.options.enable_stage1` 来决定默认是否执行预训练，并在 `pipeline.options.stage1_checkpoint` 中填写已有模型路径，实现开箱即用的 Stage 2 训练。所有 Stage 2 的学习率、warmup、CE 加权模式、episodic 采样和原型设置等均集中在 `pipeline.stage2_overrides` 中，方便统一管理。
+
+当前 Stage 2 配置附带 6 个 epoch 的 warmup：对比损失权重从 0 平滑拉升到 100%，学习率从 0.2× 线性恢复到 1×，前 3 个 epoch 会冻结 backbone 与 projector，同时始终保持 episodic 采样，并默认启用梯度自适应 CE 加权，避免早期剧烈震荡。
+
+各阶段的配置、指标、checkpoint 与 projector 诊断布局见 `save/README_two_stage.md`。
 ### Streamlit 图形界面
 
 使用 Streamlit 提供的图形界面运行实验：

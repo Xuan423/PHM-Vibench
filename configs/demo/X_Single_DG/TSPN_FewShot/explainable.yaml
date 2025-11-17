@@ -105,7 +105,6 @@ task:
     support_per_class: 3
     query_per_class: 10
     preserve_labels: true
-    episodes_per_epoch: 10 # 200
     warn_on_shortfall: true
     format: "episode"
   contrastive:

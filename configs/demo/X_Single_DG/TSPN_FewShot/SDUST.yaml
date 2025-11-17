@@ -27,7 +27,5 @@ task:
     support_per_class: 3
     query_per_class: 6
     preserve_labels: true
-    episodes_per_epoch: 10
     warn_on_shortfall: true
     format: "episode"
-

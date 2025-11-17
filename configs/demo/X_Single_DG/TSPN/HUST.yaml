@@ -4,19 +4,19 @@
 
 environment:
   WANDB_MODE: "disabled"
-  VBENCH_HOME: "/home/lab617/xuanli/work/PHM-Vibench"
-  PYTHONPATH: "/home/lab617/miniconda3/envs/xuanli_phmbench"
-  PHMBench: "/home/lab617/xuanli/work/PHM-Vibench"
+  VBENCH_HOME: "/home/xuanli/work/PHM-Vibench"
+  PYTHONPATH: "/home/xuanli/miniforge/envs/phmbench"
+  PHMBench: "/home/xuanli/work/PHM-Vibench"
 
   project: "dummy_test"
-  seed: 17
+  seed: 18
   output_dir: "results/dummy_test"
   notes: "This is a dummy test configuration."
-  iterations: 5
+  iterations: 1
 
 # 数据配置
 data:
-  data_dir: "/home/lab617/xuanli/dataset/PHMbench_rawdata"
+  data_dir: "/mnt/e/dataset/PHMbench-raw_data"
   metadata_file: "metadata_9_29.xlsx"
   batch_size: 64 # TODO: 和task.batch_size 保持一致
   num_workers: 8
@@ -58,7 +58,7 @@ task:
   name: "classification"
   type: 'DG'
   target_domain_id: [10] # 10
-  source_domain_id: [0,1,2,3,4] # [0,1,2,3,4]
+  source_domain_id: [0,1] # [0,1,2,3,4]
   loss: "CE" # cross_entropy
   metrics: ["acc"]
   target_system_id: [19] # None # [1]
@@ -87,8 +87,8 @@ trainer:
   name: "Default_trainer"
   wandb: true
   pruning: False
-  num_epochs: 10
+  num_epochs: 100
   gpus: 1
   early_stopping: true
-  patience: 5
+  patience: 50
   device: 'cuda'
