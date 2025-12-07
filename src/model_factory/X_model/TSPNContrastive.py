@@ -1,320 +1,177 @@
-"""Contrastive wrapper around the baseline TSPN model."""
+"""Transparent Statistical Prototypical Network (TSPN) with SPD geometry and prototype memory."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from pathlib import Path
+from dataclasses import dataclass
 from typing import Any, Dict, Optional
+import warnings
 
-import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
-from .TSPN import Model as TSPNModel
-from ..modules import PhysicsConvexProjector, SPDCouplingMetric
-
-
-@dataclass
-class ProjectorPriorConfig:
-    path: Optional[str] = None
-    format: str = "npy"
-    temperature: float = 1.0
-
-
-@dataclass
-class PhysicalProjectorConfig:
-    enabled: bool = False
-    indicator_dim: int = 64
-    init: str = "uniform"
-    simplex_eps: float = 1e-6
-    spd_rank: int = 4
-    tau_init: float = 1.0
-    tau_min: float = 1e-4
-    prior: ProjectorPriorConfig = field(default_factory=ProjectorPriorConfig)
+from .TSPN import TransparentSignalFeatureExtractor as TSFExtractor
+from ..modules import (
+    PhysicsStatSPDConfig,
+    PhysicsStatSPDLayer,
+    OrthogonalProjector,
+    OrthogonalProjectorConfig,
+    ContrastiveHead,
+    ClassifierHead,
+    PrototypeMemory,
+    PrototypeMemoryConfig,
+)
+import warnings
 
 
 @dataclass
-class ContrastiveConfig:
-    enabled: bool
-    temperature: float
-    loss_weight: float
-    reg_weight: float = 0.0
-    physical_projector: PhysicalProjectorConfig = field(default_factory=PhysicalProjectorConfig)
+class LossWeights:
+    lambda_proto: float = 1.0
+    lambda_var: float = 0.0
+    lambda_ortho: float = 1e-3
+    lambda_phys: float = 0.0
+    temperature: float = 0.2
 
 
-def _to_physical_projector_config(raw_cfg: Any) -> PhysicalProjectorConfig:
-    if raw_cfg is None:
-        return PhysicalProjectorConfig()
+@dataclass
+class HeadConfig:
+    contrast_dim: int = 128
 
-    prior_raw = getattr(raw_cfg, "prior", None)
-    prior_cfg = ProjectorPriorConfig(
-        path=getattr(prior_raw, "path", None) if prior_raw is not None else None,
-        format=str(getattr(prior_raw, "format", "npy") or "npy") if prior_raw is not None else "npy",
-        temperature=float(getattr(prior_raw, "temperature", 1.0)) if prior_raw is not None else 1.0,
+
+@dataclass
+class ReducerConfig:
+    dim: int
+
+
+@dataclass
+class TSPNContrastiveConfig:
+    spd: PhysicsStatSPDConfig
+    projector: OrthogonalProjectorConfig
+    head: HeadConfig
+    loss: LossWeights
+    prototype: PrototypeMemoryConfig
+    reducer: ReducerConfig
+
+
+def _resolve_num_classes(args: Any) -> int:
+    num_classes = getattr(args, "num_classes", None)
+    if isinstance(num_classes, dict):
+        if not num_classes:
+            raise ValueError("num_classes mapping is empty")
+        return int(max(num_classes.values()))
+    if isinstance(num_classes, (list, tuple)):
+        if not num_classes:
+            raise ValueError("num_classes sequence is empty")
+        return int(num_classes[0])
+    if num_classes is None:
+        raise ValueError("Model configuration missing num_classes")
+    return int(num_classes)
+
+
+def _to_cfg(args: Any, feat_dim: int, num_classes: int) -> TSPNContrastiveConfig:
+    raw = getattr(args, "tspn", None) or getattr(args, "contrastive", None)
+    spd_raw = getattr(raw, "spd", None)
+    projector_raw = getattr(raw, "projector", None)
+    head_raw = getattr(raw, "head", None)
+    loss_raw = getattr(raw, "loss", None)
+    proto_raw = getattr(raw, "prototype_memory", None)
+    reducer_raw = getattr(raw, "reducer", None)
+
+    reducer_dim = int(getattr(reducer_raw, "dim", max(32, feat_dim // 4)))
+
+    spd_cfg = PhysicsStatSPDConfig(
+        feat_dim=reducer_dim,
+        eps=float(getattr(spd_raw, "eps", 1e-3)),
+        momentum=float(getattr(spd_raw, "momentum", 0.1)),
+        block_size=int(getattr(spd_raw, "block_size", 0)),
     )
-
-    return PhysicalProjectorConfig(
-        enabled=bool(getattr(raw_cfg, "enabled", False)),
-        indicator_dim=int(getattr(raw_cfg, "indicator_dim", 64)),
-        init=str(getattr(raw_cfg, "init", "uniform")),
-        simplex_eps=float(getattr(raw_cfg, "simplex_eps", 1e-6)),
-        spd_rank=int(getattr(raw_cfg, "spd_rank", 4)),
-        tau_init=float(getattr(raw_cfg, "tau_init", 1.0)),
-        tau_min=float(getattr(raw_cfg, "tau_min", 1e-4)),
-        prior=prior_cfg,
+    projector_cfg = OrthogonalProjectorConfig(
+        in_dim=spd_cfg.feat_dim + spd_cfg.feat_dim * (spd_cfg.feat_dim + 1) // 2,
+        proj_dim=int(getattr(projector_raw, "proj_dim", min(64, spd_cfg.feat_dim * 2))),
+        reorth_every=int(getattr(projector_raw, "reorth_every", 10)),
     )
-
-
-def _to_contrastive_config(raw_cfg: Any) -> ContrastiveConfig:
-    """Convert configuration namespace into a structured dataclass."""
-    if raw_cfg is None:
-        return ContrastiveConfig(False, 1.0, 0.0, 0.0)
-
-    enabled = bool(getattr(raw_cfg, "enabled", False))
-    temperature = float(getattr(raw_cfg, "temperature", 1.0))
-    loss_weight = float(getattr(raw_cfg, "loss_weight", 0.0))
-    reg_weight = float(getattr(raw_cfg, "reg_weight", getattr(raw_cfg, "lambda_reg", 0.0)))
-    physical_projector = _to_physical_projector_config(getattr(raw_cfg, "physical_projector", None))
-
-    return ContrastiveConfig(
-        enabled=enabled,
-        temperature=temperature,
-        loss_weight=loss_weight,
-        reg_weight=reg_weight,
-        physical_projector=physical_projector,
+    head_cfg = HeadConfig(contrast_dim=int(getattr(head_raw, "contrast_dim", 128)))
+    loss_cfg = LossWeights(
+        lambda_proto=float(getattr(loss_raw, "lambda_proto", 1.0)),
+        lambda_var=float(getattr(loss_raw, "lambda_var", 0.0)),
+        lambda_ortho=float(getattr(loss_raw, "lambda_ortho", 1e-3)),
+        lambda_phys=float(getattr(loss_raw, "lambda_phys", 0.0)),
+        temperature=float(getattr(loss_raw, "temperature", getattr(raw, "temperature", 0.2))),
     )
-
-
-class IndicatorClassifier(nn.Module):
-    """Classifier operating on physical indicator vectors with explainable weights."""
-
-    def __init__(self, input_dim: int, num_classes: int) -> None:
-        super().__init__()
-        self.linear = nn.Linear(input_dim, num_classes, bias=True)
-
-    def forward(self, indicators: torch.Tensor) -> torch.Tensor:
-        flat = indicators.view(indicators.size(0), -1)
-        return self.linear(flat)
-
-    def explain_weights(self) -> Dict[str, torch.Tensor]:
-        weight = self.linear.weight.detach().clone()
-        bias = self.linear.bias.detach().clone() if self.linear.bias is not None else None
-        payload: Dict[str, torch.Tensor] = {"weight": weight}
-        if bias is not None:
-            payload["bias"] = bias
-        return payload
+    proto_cfg = PrototypeMemoryConfig(
+        num_classes=num_classes,
+        feat_dim=head_cfg.contrast_dim,
+        num_domains=getattr(proto_raw, "num_domains", None),
+        momentum=float(getattr(proto_raw, "momentum", 0.99)),
+    )
+    reducer_cfg = ReducerConfig(dim=reducer_dim)
+    return TSPNContrastiveConfig(
+        spd=spd_cfg,
+        projector=projector_cfg,
+        head=head_cfg,
+        loss=loss_cfg,
+        prototype=proto_cfg,
+        reducer=reducer_cfg,
+    )
 
 
 class Model(nn.Module):
-    """TSPN backbone with an optional contrastive projection head.
-
-    The wrapper leaves the baseline behaviour untouched when the
-    contrastive configuration is disabled. When enabled, a projector is
-    provided and the forward method can optionally return embeddings for
-    contrastive loss computation.
-    """
+    """Transparent Statistical Prototypical Network."""
 
     def __init__(self, args: Any, metadata: Optional[Any] = None) -> None:
         super().__init__()
+        if getattr(args, "device", "cpu") == "cuda" and not torch.cuda.is_available():
+            warnings.warn("CUDA requested but not available; falling back to CPU.")
+            args.device = "cpu"
         self.args = args
-        self.backbone = TSPNModel(args, metadata)
+        self.extractor = TSFExtractor(args, metadata)
+        self.raw_feature_dim = self.extractor.channel_for_classifier
+        self.num_classes = _resolve_num_classes(args)
 
-        raw_cfg = getattr(args, "contrastive", None)
-        self.contrastive_cfg = _to_contrastive_config(raw_cfg)
+        cfg = _to_cfg(args, self.raw_feature_dim, self.num_classes)
+        self.cfg = cfg
 
-        self.feature_dim = getattr(self.backbone, "channel_for_classifier", None)
-        if self.feature_dim is None:
-            raise ValueError("TSPNContrastive requires backbone to expose channel_for_classifier")
+        self.reducer = nn.Linear(self.extractor.channel_for_classifier, cfg.reducer.dim)
+        self.spd_layer = PhysicsStatSPDLayer(cfg.spd)
+        self.projector = OrthogonalProjector(cfg.projector)
+        self.contrastive_head = ContrastiveHead(cfg.projector.in_dim, cfg.head.contrast_dim)
+        self.classifier = ClassifierHead(cfg.projector.in_dim, self.num_classes)
+        self.prototype_memory = PrototypeMemory(cfg.prototype)
 
-        self.temperature = self.contrastive_cfg.temperature
-        self.contrastive_weight = self.contrastive_cfg.loss_weight
-        self._last_projector_penalty: Dict[str, torch.Tensor] = {}
+    @property
+    def feature_dim(self) -> int:
+        return self.cfg.reducer.dim
 
-        device = getattr(self.args, "device", "cpu")
-        self.projector_cfg = self.contrastive_cfg.physical_projector
-        self.physics_projector: Optional[PhysicsConvexProjector] = None
-        self.spd_metric: Optional[SPDCouplingMetric] = None
-        self.classifier: nn.Module = self.backbone.clf
-        self._embedding_dim = self.feature_dim
+    @property
+    def embedding_dim(self) -> int:
+        return self.cfg.projector.in_dim
 
-        if self.projector_cfg.enabled:
-            self._initialize_physics_layers(device=device)
-
-    # ------------------------------------------------------------------
-    # Utilities
-    # ------------------------------------------------------------------
-    def _initialize_physics_layers(self, *, device: Optional[Any]) -> None:
-        if self.projector_cfg.indicator_dim <= 0:
-            raise ValueError("Physics projector requires indicator_dim > 0")
-        num_classes = getattr(self.backbone, "num_classes", None)
-        if num_classes is None:
-            num_classes = int(getattr(self.args, "num_classes", 0))
-        if num_classes <= 0:
-            raise ValueError("Physics projector requires a valid num_classes value.")
-
-        projector = self._build_physics_projector(device=device)
-        metric = SPDCouplingMetric(
-            axis_dim=self.projector_cfg.indicator_dim,
-            rank=max(1, self.projector_cfg.spd_rank),
-            tau_init=self.projector_cfg.tau_init,
-            tau_min=self.projector_cfg.tau_min,
-        )
-
-        self.physics_projector = projector.to(device)
-        self.spd_metric = metric.to(device)
-        self.classifier = IndicatorClassifier(self.projector_cfg.indicator_dim, num_classes).to(device)
-        self._embedding_dim = self.projector_cfg.indicator_dim
-
-    def _build_physics_projector(self, *, device: Optional[Any]) -> PhysicsConvexProjector:
-        mask = self._load_projector_prior_mask(device=device)
-        projector = PhysicsConvexProjector(
-            input_dim=self.feature_dim,
-            axis_dim=self.projector_cfg.indicator_dim,
-            simplex_eps=self.projector_cfg.simplex_eps,
-            prior_mask=mask,
-            init=self.projector_cfg.init,
-        )
-        return projector
-
-    def _load_projector_prior_mask(self, *, device: Optional[Any]) -> Optional[torch.Tensor]:
-        prior_cfg = self.projector_cfg.prior
-        if prior_cfg.path is None:
-            return None
-
-        path = Path(prior_cfg.path).expanduser()
-        if not path.exists():
-            raise FileNotFoundError(f"Physical projector prior not found: {path}")
-
-        fmt = (prior_cfg.format or "npy").lower()
-        if fmt == "npy":
-            data = np.load(path)
-        elif fmt in ("yaml", "yml"):
-            try:
-                import yaml  # type: ignore
-            except ImportError as exc:  # pragma: no cover - guard for missing optional dependency
-                raise ImportError("PyYAML is required to load YAML projector priors.") from exc
-            with path.open("r", encoding="utf-8") as handle:
-                data = yaml.safe_load(handle)
-        else:
-            raise ValueError(f"Unsupported projector prior format: {fmt}")
-
-        mask = torch.as_tensor(data, dtype=torch.float32)
-
-        expected = (self.feature_dim, self.projector_cfg.indicator_dim)
-        if mask.shape != expected:
-            raise ValueError(
-                f"Physical projector prior shape {mask.shape} does not match expected {expected}."
-            )
-
-        if prior_cfg.temperature != 1.0:
-            mask = torch.sigmoid(prior_cfg.temperature * (mask - 0.5))
-
-        return mask.to(device)
-
-    def encode(self, x: torch.Tensor, *, return_raw: bool = False) -> torch.Tensor:
-        """Return indicator embeddings (or raw features when requested)."""
-        out = x
-        for layer in self.backbone.signal_processing_layers:
-            out = layer(out)
-        features = self.backbone.feature_extractor_layers(out)
-        flat = features.view(features.size(0), -1)
-
-        if (
-            not self.projector_cfg.enabled
-            or self.physics_projector is None
-            or self.spd_metric is None
-            or return_raw
-        ):
-            self._last_projector_penalty = {}
-            return flat
-
-        axes, penalties = self.physics_projector(flat)
-        self._last_projector_penalty = penalties
-        embeddings = self.spd_metric(axes)
-        return embeddings
-
-    # ------------------------------------------------------------------
-    # Forward interfaces
-    # ------------------------------------------------------------------
-    def forward(
-        self,
-        x: torch.Tensor,
-        data_id: Optional[Any] = None,
-        task_id: Optional[Any] = None,
-        *,
-        return_embeddings: bool = False,
-    ) -> Any:
-        if not return_embeddings:
-            return self.forward_logits(x, data_id=data_id, task_id=task_id)
-
-        embeddings = self.encode(x)
-        logits = self.classifier(embeddings)
-        payload: Dict[str, Any] = {
+    def forward(self, x: torch.Tensor, *_, return_dict: bool = False, **__) -> torch.Tensor | Dict[str, torch.Tensor]:
+        h_raw = self.extractor(x)
+        h = self.reducer(h_raw)
+        v = self.spd_layer(h)
+        z_phys, z_spur = self.projector(v)
+        logits = self.classifier(z_phys)
+        u = self.contrastive_head(z_phys)
+        payload = {
+            "h_raw": h_raw,
+            "h": h,
+            "spd_vec": v[:, self.feature_dim :],
+            "v": v,
+            "z_phys": z_phys,
+            "z_spur": z_spur,
+            "u": u,
             "logits": logits,
-            "embeddings": embeddings,
-            "projection": embeddings,
-            "temperature": self.temperature,
         }
-        if self._last_projector_penalty:
-            payload["indicator_penalties"] = self._last_projector_penalty
-        if self.spd_metric is not None:
-            payload["metric_regularizer"] = self.spd_metric.regularization()
-        return payload
-
-    # The default classification loss path expects tensors, so expose a dedicated
-    # helper that mirrors the original backbone interface when only logits are
-    # required.
-    def forward_logits(
-        self,
-        x: torch.Tensor,
-        data_id: Optional[Any] = None,
-        task_id: Optional[Any] = None,
-    ) -> torch.Tensor:
-        if (
-            not self.projector_cfg.enabled
-            or self.physics_projector is None
-            or self.spd_metric is None
-        ):
-            return self.backbone.forward(x, data_id=data_id, task_id=task_id)
-
-        embeddings = self.encode(x)
-        logits = self.classifier(embeddings)
+        if return_dict:
+            return payload
         return logits
 
-    # ------------------------------------------------------------------
-    # Explainability utilities
-    # ------------------------------------------------------------------
-    def indicator_penalties(self) -> Dict[str, torch.Tensor]:
-        return self._last_projector_penalty
+    def reorthogonalize(self) -> None:
+        self.projector.reorthogonalize()
 
-    def explain_indicator_weights(self) -> Optional[Dict[str, torch.Tensor]]:
-        if not isinstance(self.classifier, IndicatorClassifier):
-            return None
-        weights = self.classifier.explain_weights()
-        return {key: value.detach().cpu() for key, value in weights.items()}
+    def ortho_loss(self) -> torch.Tensor:
+        return self.projector.ortho_loss()
 
-    def explain_projection_matrix(self) -> Optional[torch.Tensor]:
-        if self.physics_projector is None:
-            return None
-        return self.physics_projector.explain_axes()
-
-    def explain_spd_metric(self) -> Optional[Dict[str, torch.Tensor]]:
-        if self.spd_metric is None:
-            return None
-        state = self.spd_metric.explain()
-        return {
-            "diag": state.diag,
-            "low_rank": state.low_rank,
-            "temperature": state.temperature,
-        }
-
-    def metric_regularization(self) -> torch.Tensor:
-        if self.spd_metric is None:
-            device = next(self.parameters()).device
-            return torch.tensor(0.0, device=device)
-        return self.spd_metric.regularization()
-
-    def metric_similarity(self, anchors: torch.Tensor, samples: torch.Tensor) -> torch.Tensor:
-        if self.spd_metric is None:
-            raise RuntimeError("SPD metric not initialized.")
-        return self.spd_metric.similarity(anchors, samples)
+    def contrastive_temperature(self) -> float:
+        return self.cfg.loss.temperature

@@ -437,7 +437,6 @@ class Laplace_neural_operator(SignalProcessingBase):
 
     def forward(self, x):
         x = rearrange(x, 'b l c -> b c l')
-        # t = grid_x_train.cuda()
         # x.shape = (batch_size, width, length),20,4,2048
         t = torch.linspace(0, 1, steps=x.shape[-1], dtype=x.dtype, device=x.device)
         #Compute input poles and resudes by FFT
@@ -445,7 +444,7 @@ class Laplace_neural_operator(SignalProcessingBase):
         alpha = torch.fft.fft(x)
         lambda0=torch.fft.fftfreq(t.shape[0], dt)*2*np.pi*1j
         lambda1=lambda0.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
-        lambda1=lambda1.cuda()
+        lambda1=lambda1.to(alpha.device)
     
         # Obtain output poles and residues for transient part and steady-state part
         output_residue1,output_residue2= self.output_PR(lambda1, alpha, self.weights_pole, self.weights_residue)

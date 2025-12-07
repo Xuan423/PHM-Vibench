@@ -13,7 +13,7 @@ def main():
     
     parser.add_argument('--config_path', 
                         type=str, 
-                        default='configs/demo/X_Single_DG/TSPN/HUST.yaml',
+                        default='configs/demo/X_Single_DG/TSPN_FewShot/HUST.yaml',
                         # default='configs/demo/X_Single_DG/TSPN_FewShot/SDUST.yaml',
                         # Alternative configs:
                         # 'configs/demo/Single_DG/CWRU.yaml'

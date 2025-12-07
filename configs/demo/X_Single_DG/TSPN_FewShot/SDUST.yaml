@@ -1,31 +1,23 @@
 __include__:
-  - contrastive.yaml
+  - base.yaml
 
 environment:
   project: "tspn_fewshot_sdust"
   output_dir: "results/tspn_fewshot_sdust"
-  notes: "Few-shot TSPN DG run targeting SDUST9."
-  iterations: 1
-  swanlab: false
+  notes: "SDUST system adaptation."
 
 model:
   num_classes: 10
-  in_channels : 6
-  contrastive:
-    loss_weight: &contrastive_loss_weight 0.3
+  in_channels: 6
 
 task:
   target_system_id: [21]
-  target_domain_id: [40] #37
-  source_domain_id: [3,7,12,16,20,24] # [0,4,9,13,17,21]   [1,5,10,14,18,22]  [2,6,11,15,19,23]
-  few_shot:
-    enabled: true
-    sampler: "hierarchical"
-    systems_per_episode: 1
-    domains_per_episode: 4
-    classes_per_domain: 8
-    support_per_class: 3
-    query_per_class: 6
-    preserve_labels: true
-    warn_on_shortfall: true
-    format: "episode"
+  target_domain_id: [40]
+  source_domain_id: [3, 7, 12, 16, 20, 24]
+  epochs: 120
+  lr: 0.0025
+  type: "DG"
+
+trainer:
+  num_epochs: 120
+  patience: 12

@@ -1,0 +1,16 @@
+__include__:
+  - base.yaml
+
+environment:
+  project: "tspn_fewshot_hust"
+  output_dir: "results/tspn_fewshot_hust"
+  notes: "HUST deployment baseline."
+
+task:
+  target_system_id: [19]
+  target_domain_id: [10]
+  source_domain_id: [0, 1, 2, 3, 4]
+  epochs: 90
+
+trainer:
+  num_epochs: 90

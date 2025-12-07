@@ -1,11 +1,17 @@
-"""Shared modules for physics-conditioned TSPN variants."""
+"""Shared modules for the revamped TSPN architecture."""
 
-from .physics_convex_projector import PhysicsConvexProjector, SimplexStats
-from .spd_metric import SPDCouplingMetric, SPDCouplingState
+from .physics_stat_spd import PhysicsStatSPDLayer, PhysicsStatSPDConfig
+from .orthogonal_projector import OrthogonalProjector, OrthogonalProjectorConfig
+from .heads import ContrastiveHead, ClassifierHead
+from .prototype_memory import PrototypeMemory, PrototypeMemoryConfig
 
 __all__ = [
-    "PhysicsConvexProjector",
-    "SimplexStats",
-    "SPDCouplingMetric",
-    "SPDCouplingState",
+    "PhysicsStatSPDLayer",
+    "PhysicsStatSPDConfig",
+    "OrthogonalProjector",
+    "OrthogonalProjectorConfig",
+    "ContrastiveHead",
+    "ClassifierHead",
+    "PrototypeMemory",
+    "PrototypeMemoryConfig",
 ]

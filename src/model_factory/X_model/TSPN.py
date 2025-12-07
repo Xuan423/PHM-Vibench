@@ -16,13 +16,13 @@ from collections import OrderedDict
 from .Signal_processing import *
 from .Feature_extract import *
 
-class Model(nn.Module):
-    """Transparent Signal Processing Network (TSPN).
+class TransparentSignalFeatureExtractor(nn.Module):
+    """Transparent Signal Processing backbone that only outputs physics statistics ``h``.
 
     Parameters
     ----------
     args : Namespace
-        Defines the module composition and ``num_classes``.
+        Defines the module composition.
     metadata : Any, optional
         Unused placeholder for compatibility.
 
@@ -38,17 +38,13 @@ class Model(nn.Module):
             args: 实验配置，包含信号处理与特征提取模块定义。
             metadata: 数据集元信息，可选。
         """
-        super(Model, self).__init__()
+        super().__init__()
         self.signal_processing_modules, self.feature_extractor_modules = self.config_network(args)
         self.layer_num = len(self.signal_processing_modules)
         self.args = args
 
-        self.num_classes = self._resolve_num_classes(args)
-        self.args.num_classes = self.num_classes
-
         self.init_signal_processing_layers()
         self.init_feature_extractor_layers()
-        self.init_classifier()
 
     def config_network(self, args):
         """
@@ -98,28 +94,8 @@ class Model(nn.Module):
         len_feature = len(self.feature_extractor_modules)
         self.channel_for_classifier = self.channel_for_feature * len_feature
 
-
-    def _resolve_num_classes(self, args):
-        num_classes = getattr(args, 'num_classes', None)
-        if isinstance(num_classes, dict):
-            if not num_classes:
-                raise ValueError('num_classes mapping is empty; cannot initialise classifier')
-            return int(max(num_classes.values()))
-        if isinstance(num_classes, (list, tuple)):
-            if not num_classes:
-                raise ValueError('num_classes sequence is empty; cannot initialise classifier')
-            return int(num_classes[0])
-        if num_classes is None:
-            raise ValueError('Model configuration missing num_classes')
-        return int(num_classes)
-
-
-    def init_classifier(self):
-        print('# build classifier')
-        self.clf = Classifier(self.channel_for_classifier, self.num_classes).to(self.args.device)
-
     def forward(self, x, data_id = None,task_id = None):
-        """Compute logits for a batch.
+        """Compute backbone features.
 
         Parameters
         ----------
@@ -127,40 +103,19 @@ class Model(nn.Module):
             Input tensor of shape ``(B, L, C)``.
         data_id : Any, optional
             Unused.
-        task_id : Any, optional
+            task_id : Any, optional
             Unused.
 
         Returns
         -------
         torch.Tensor
-            Logits of shape ``(B, num_classes)``.
+            Transparent physics statistics ``h`` of shape ``(B, D_feat)``.
         """
         # TODO: data_id,task_id
         for layer in self.signal_processing_layers:
             x = layer(x)
-        x = self.feature_extractor_layers(x)
-
-        x = self.clf(x)
-        return x
-
-class CustomBatchNorm(nn.Module):
-    def __init__(self, num_features, eps=0.1):
-        super(CustomBatchNorm, self).__init__()
-        self.num_features = num_features
-        self.eps = eps
-        self.register_buffer('running_mean', torch.zeros(1,num_features))
-        self.register_buffer('running_var', torch.ones(1,num_features))
-
-    def forward(self, x):
-        if self.training:
-            mean = x.mean(dim=0)
-            var = x.var(dim=0, unbiased=False)
-            self.running_mean = (1 - self.eps) * self.running_mean + self.eps * mean
-            self.running_var = (1 - self.eps) * self.running_var + self.eps * var
-            out = (x - mean) / (var.sqrt() + self.eps)
-        else:
-            out = (x - self.running_mean) / (self.running_var.sqrt() + self.eps)
-        return out
+        h = self.feature_extractor_layers(x)
+        return h
 
 class SignalProcessingLayer(nn.Module):
     # TODO op first then weight connection -> attention
@@ -209,7 +164,6 @@ class FeatureExtractorlayer(nn.Module):
         out_channels = int(len(feature_extractor_modules) * out_channels)
         
         self.pre_norm = nn.InstanceNorm1d(in_channels)
-        self.norm = CustomBatchNorm(out_channels)
         
         # self.temperature = 1
     # def norm(self,x): # feature normalization
@@ -231,23 +185,13 @@ class FeatureExtractorlayer(nn.Module):
         outputs = []
         for module in self.feature_extractor_modules.values():
             outputs.append(module(x))
-        res = torch.cat(outputs, dim=1).squeeze() # B,C
-        return self.norm(res)
+        res = torch.cat(outputs, dim=1)
+        res = res.squeeze()  # (B, D_feat)
+        return res
 
-class Classifier(nn.Module):
-    def __init__(self, in_channels, num_classes): # TODO logic
-        super(Classifier, self).__init__()
-        self.clf = nn.Sequential(
-            nn.Linear(in_channels, 128),
-            nn.ReLU(),
-            nn.Linear(128, num_classes)
-            
-        )
-        # self.clf = nn.Linear(in_channels, num_classes)
-        
-    def forward(self, x):
-        x = x.view(x.size(0), -1)
-        return self.clf(x)
+class Model(TransparentSignalFeatureExtractor):
+    """Compatibility alias keeping the historical entry-point name."""
+    pass
 
 def get_unique_module_name(existing_names, module_name):
     """

@@ -185,8 +185,11 @@ python main.py --config configs/demo/FewShot/protonet.yaml
 # Pretrain + Few-Shot pipeline
 python main.py --pipeline Pipeline_02_pretrain_fewshot --config_path configs/demo/Pretraining/pretrain.yaml --fs_config_path configs/demo/FewShot/protonet.yaml
 
-# Two-stage TSPN contrastive pipeline (Stage1 + Stage2, auto pipeline from config)
-python main.py --config configs/demo/X_Single_DG/TSPN_FewShot/tspn_two_stage.yaml
+# Single-phase TSPN contrastive demos
+conda activate phmbench
+python main.py --config configs/demo/X_Single_DG/TSPN_FewShot/base.yaml
+# Override `base.yaml` with HUST/JUST/SDUST scenarios as needed:
+# python main.py --config configs/demo/X_Single_DG/TSPN_FewShot/HUST.yaml
 
 # Cross-dataset generalization
 python main.py --config configs/demo/Multiple_DG/CWRU_THU_using_ISFM.yaml
@@ -195,17 +198,7 @@ python main.py --config configs/demo/Multiple_DG/CWRU_THU_using_ISFM.yaml
 python main.py --config configs/demo/Multiple_DG/all.yaml
 ```
 
-The two-stage config embeds the pipeline module (`pipelines.tspn_two_stage.pipeline`) plus defaults for Stage 2 overrides, so you can just pass the YAML. These CLI switches remain available for ad-hoc overrides:
-
-- `--two_stage_mode {stage1,stage2,both}` to force a specific stage (default `auto` defers to the config’s `pipeline.options.enable_stage1`).
-- `--stage1_checkpoint <path>` when resuming Stage 2 without rerunning Stage 1.
-- `--projector_log_dir <path>` to override where projector trajectories are written.
-
-Inside the YAML you can toggle Stage 1 by flipping `pipeline.options.enable_stage1`, and you can pre-populate `pipeline.options.stage1_checkpoint` so Stage 2 bootstraps from an existing checkpoint without passing CLI arguments. All Stage 2 tuning knobs (LR schedule, warmup ramps, CE-weighting mode, episodic sampler defaults, prototype controls) now live under `pipeline.stage2_overrides`, making this file the single source of truth.
-
-The bundled Stage 2 overrides apply a 6-epoch warmup (contrastive weight ramps from 0→100%, LR from 0.2×→1×, backbone/projector stay frozen for three epochs) while keeping episodic sampling active the entire time. CE balancing defaults to the grad-adaptive controller so the classifier and contrastive branches stay in step automatically.
-
-Artifacts for each stage (configs, metrics, checkpoints, projector snapshots) are detailed in `save/README_two_stage.md`.
+The legacy two-stage pipeline has been retired. The new single-phase setup keeps everything in the four YAML files under `configs/demo/X_Single_DG/TSPN_FewShot/` (`base`, `HUST`, `JUST`, `SDUST`). Adjusting those files now controls the transparent backbone, SPD geometry, projector rank, prototype memory, and loss weights end-to-end.
 
 ### Streamlit Graphical Interface （TODO）
 

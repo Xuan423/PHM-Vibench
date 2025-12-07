@@ -43,7 +43,9 @@ class Default_task(pl.LightningModule):
         :param metadata: 数据元信息
         """
         super().__init__()
-        self.network = network.cuda() if args_trainer.gpus else network  # 确保网络在正确的设备上
+        trainer_device = getattr(args_trainer, "device", None)
+        use_cuda = bool(trainer_device and trainer_device != "cpu" and getattr(args_trainer, "gpus", 0) > 0)
+        self.network = network.cuda() if use_cuda else network  # 确保网络在正确的设备上
         self.args_task = args_task
         self.args_model = args_model
         self.args_data = args_data
@@ -283,4 +285,3 @@ class Default_task(pl.LightningModule):
 
         # 对于非 ReduceLROnPlateau 的调度器，返回列表形式
         return [optimizer], [{'scheduler': scheduler, 'interval': 'epoch', 'frequency': 1}]
-
