@@ -1,54 +1,34 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- `src/` holds runnable pipelines and the data/model/task/trainer factories; implement new logic in the matching factory to preserve modular wiring.
-- `configs/` stores experiment YAMLs—start from `configs/demo/Single_DG/CWRU.yaml`, clone templates in `configs/experiments/`, and keep local variants under a dedicated subfolder.
-- Runtime assets stay outside Git: raw inputs in `data/`, results in `save/`, visuals in `pic/`, docs in `docs/`; active tests live in `test/` while legacy stress suites remain in `tests/`.
-- see @CLAUDE.md for better understanding of the Vibench.
-
-## Architecture Highlights
-- Factory pattern with registries for data, models, tasks, and trainers (`src/*_factory/CLAUDE.md` for deep dives).
-- Pipelines include `Pipeline_01_default`, `Pipeline_02_pretrain_fewshot`, `Pipeline_03_multitask_pretrain_finetune`, and `Pipeline_ID`.
-- Configuration-first design via `load_config()` supporting presets, YAML files, dictionaries, and `ConfigWrapper` overrides.
-- Save artifacts under `save/{metadata}/{model}/{task_trainer_timestamp}/` with checkpoints, metrics, logs, figures, and config backup.
-
-## Configuration System
-- Unified loader handles preset aliases plus recursive dot-notation overrides: `load_config('isfm', {'model.d_model': 512})`.
-- Keep YAML keys lowercase with hyphen-separated values to match samples in `configs/demo/`.
-- Pipelines read full experiment context from config; avoid hard-coded paths or hyperparameters.
-- Extended guide in `src/configs/CLAUDE.md` covers chaining (`copy().update()`), multi-stage pipelines, and override precedence.
-
-## Dataset Integration
-- Raw inputs belong in `data/raw/<dataset_name>/` with metadata spreadsheets (`metadata_*.xlsx`) and processed H5 files.
-- Implement readers by inheriting `BaseReader` and register them inside `src/data_factory/__init__.py`.
-- Reference examples in `src/data_factory/reader/RM_*.py` and document quirks in dataset-specific notes.
-- Maintain consistent directory casing and validate new datasets with `python scripts/hse_synthetic_demo.py`.
-
-## Model and Task Registry
-- Foundation models live under `model_factory` (e.g., `M_01_ISFM`, `M_02_ISFM`, `M_03_ISFM`) alongside backbone networks (`B_08_PatchTST`, `B_09_FNO`, etc.).
-- Attach heads such as `H_01_Linear_cla` or `H_03_Linear_pred` for classification vs prediction workloads.
-- Tasks cover classification, cross-dataset domain generalization, few-shot (FS/GFS), and pretraining—wire them via `task_factory`.
-- Trainer implementations extend PyTorch Lightning; keep Lightning callbacks and loggers configurable.
+- Pipelines, data/model/task/trainer factories live in `src/`; add new logic via the matching factory registry to keep wiring modular.
+- Experiment configs sit in `configs/` (start from `configs/demo/Single_DG/CWRU.yaml`); clone templates in `configs/experiments/` and keep local variants in their own subfolder.
+- Runtime assets stay out of Git: raw data in `data/`, outputs in `save/`, visuals in `pic/`, docs in `docs/`; active tests in `test/` (legacy stress suites in `tests/`).
+- See `src/*_factory/CLAUDE.md` and `src/configs/CLAUDE.md` for deeper architecture notes.
 
 ## Build, Test, and Development Commands
-- `python -m venv venv && source venv/bin/activate` then `pip install -r requirements.txt` (add `dev/test_history/requirements-test.txt` when evolving pytest suites).
-- Run baselines with `python main.py --config configs/demo/Single_DG/CWRU.yaml`; swap in unified metric configs when reproducing cross-domain benchmarks.
-- `python scripts/hse_synthetic_demo.py` validates the HSE pipeline quickly, and `streamlit run streamlit_app.py` launches the monitoring UI for manual QA.
-- Use `python -m pytest test/` for routine checks; call `python dev/test_history/run_tests.py --unit` or append `--coverage` when mirroring the historical matrix.
+- `python -m venv venv && source venv/bin/activate && pip install -r requirements.txt` — set up the environment (add `dev/test_history/requirements-test.txt` when extending pytest suites).
+- `python main.py --config configs/demo/Single_DG/CWRU.yaml` — run the default CWRU baseline; swap in other YAMLs or use `load_config` overrides.
+- `python scripts/hse_synthetic_demo.py` — quick validation of the HSE pipeline.
+- `python -m pytest test/` — run maintained tests; add `--cov=src --cov-report=term` for coverage or use `python dev/test_history/run_tests.py --unit` to mirror history.
+- `streamlit run streamlit_app.py` — launch the monitoring UI for manual QA.
 
 ## Coding Style & Naming Conventions
-- Follow PEP 8 with a 100-character limit, grouped imports, and NumPy-style docstrings for any public API.
-- Classes use `PascalCase`, functions and variables `snake_case`, constants `UPPER_CASE`, and config folders follow `task_dataset_variant`.
-- Format before committing: `black src/ test/`, `isort src/ test/`; enforce linting with `flake8` and static checks through `mypy src/`.
-- Keep YAML keys lowercase with hyphen-separated values to match the existing samples in `configs/demo/`.
+- Follow PEP 8, 100-character lines, grouped imports, NumPy-style docstrings for public APIs.
+- Naming: classes `PascalCase`, functions/vars `snake_case`, constants `UPPER_CASE`; config folders use `task_dataset_variant`.
+- Keep YAML keys lowercase with hyphen-separated values. Avoid hard-coded paths; prefer config-driven defaults.
+- Format before committing: `black src/ test/` and `isort src/ test/`; lint with `flake8` and static-check with `mypy src/`.
 
 ## Testing Guidelines
-- The maintained pytest suite sits in `test/` with unit, integration, and performance markers; migrate refreshed stress tests from `tests/` as they stabilise.
-- Name files `test_<feature>.py`, tag long cases `@pytest.mark.slow`, and guard GPU paths with `@pytest.mark.gpu` to keep automation green.
-- Target coverage on critical pipelines via `pytest --cov=src --cov-report=term`, and note accuracy or latency outcomes alongside the command in pull requests.
+- Tests live in `test/`; name files `test_<feature>.py`. Mark long runs with `@pytest.mark.slow` and GPU paths with `@pytest.mark.gpu`.
+- Target coverage on critical pipelines (`pytest --cov=src --cov-report=term`). Document accuracy/latency changes alongside commands when altering models.
 
 ## Commit & Pull Request Guidelines
-- Mirror recent history: imperative subjects, optional scoped prefixes (`docs(hse):`, `refactor:`), and keep English summaries unless you are updating Chinese-only docs.
-- Keep commits focused—split config updates, factory changes, and docs so each diff stays reviewable and reversible.
-- PRs should include a problem statement, model/dataset impact summary, reproduction commands, and links to tracked issues.
-- Attach artifact paths under `save/<metadata>/<model>/<experiment>` or UI screenshots, and confirm any data-source change complies with `SECURITY.md`.
+- Commit messages: imperative mood, optional scoped prefixes (e.g., `docs(hse):`, `refactor:`); English unless updating Chinese-only docs.
+- Keep commits focused (separate config, factory, and docs changes). Include problem statement, dataset/model impact, reproduction commands, and artifact paths under `save/<metadata>/<model>/<experiment>`.
+- Link tracked issues; add screenshots or UI notes when relevant. Ensure any data-source change follows `SECURITY.md`.
+
+## Architecture & Configuration Tips
+- Factory pattern with registries for data, models, tasks, and trainers; pipelines include `Pipeline_01_default`, `Pipeline_02_pretrain_fewshot`, `Pipeline_03_multitask_pretrain_finetune`, and `Pipeline_ID`.
+- Use `load_config('isfm', {'model.d_model': 512})` to apply presets with dot-notation overrides; prefer `copy().update()` for chained configs.
+- Save outputs under `save/{metadata}/{model}/{task_trainer_timestamp}/` (checkpoints, metrics, logs, figures, config backup).

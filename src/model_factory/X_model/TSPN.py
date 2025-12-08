@@ -13,8 +13,8 @@ import torch.nn as nn
 from einops import rearrange
 import torch.nn.functional as F
 from collections import OrderedDict
-from .Signal_processing import *
-from .Feature_extract import *
+from .utils.Signal_processing import *
+from .utils.Feature_extract import *
 
 class Model(nn.Module):
     """Transparent Signal Processing Network (TSPN).
@@ -219,17 +219,19 @@ class FeatureExtractorlayer(nn.Module):
 class Classifier(nn.Module):
     def __init__(self, in_channels, num_classes): # TODO logic
         super(Classifier, self).__init__()
-        self.clf = nn.Sequential(
-            nn.Linear(in_channels, 128),
-            nn.ReLU(),
-            nn.Linear(128, num_classes)
-            
-        )
-        # self.clf = nn.Linear(in_channels, num_classes)
+        self.data_name = num_classes.keys()
+        for data_name, n_class in num_classes.items():
+            self.add_module(f"clf_{data_name}", nn.Sequential(nn.Linear(in_channels, 128),
+                                                              nn.ReLU(),
+                                                              nn.Linear(128, n_class)))
         
     def forward(self, x):
         x = x.view(x.size(0), -1)
-        return self.clf(x)
+        # TODO: fit cross system tasks
+        for data_name in self.data_name:
+            clf = getattr(self, f"clf_{data_name}")
+            x = clf(x)
+        return x
 
 def get_unique_module_name(existing_names, module_name):
     """
