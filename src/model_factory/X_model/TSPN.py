@@ -208,8 +208,8 @@ class FeatureExtractorlayer(nn.Module):
         normed_x = self.pre_norm(x)
         normed_x = rearrange(normed_x, 'b c l -> b l c')
         
-        x = self.weight_connection(normed_x)
-        x = rearrange(x, 'b l c -> b c l')
+        # x = self.weight_connection(normed_x)
+        x = rearrange(normed_x, 'b l c -> b c l')
         outputs = []
         for module in self.feature_extractor_modules.values():
             outputs.append(module(x))

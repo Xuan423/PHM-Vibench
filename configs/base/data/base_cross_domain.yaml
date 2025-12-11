@@ -1,7 +1,7 @@
 data:
   data_dir: "/mnt/e/dataset/PHMbench-raw_data"
   metadata_file: "metadata.xlsx"
-  batch_size: 256
+  batch_size: 64
   num_workers: 8
   train_ratio: 0.8
   val_ratio: 0.1

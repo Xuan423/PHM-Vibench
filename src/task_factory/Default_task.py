@@ -82,6 +82,8 @@ class Default_task(pl.LightningModule):
 
     def forward(self, batch):
         """模型前向传播"""
+        if hasattr(self.network, "forward_with_batch"):
+            return self.network.forward_with_batch(batch, getattr(self, "current_epoch", 0))
         x = batch['x']
         file_id = batch['file_id']
         task_id = batch['task_id'] if 'task_id' in batch else None
@@ -138,7 +140,9 @@ class Default_task(pl.LightningModule):
             # x, y, id = batch['x'], batch['y'], batch['id']
             # Ensure a default task identifier if not provided
             batch.setdefault('task_id', 'classification')
-            # Convert tensor-based ID to a Python int for indexing metadata
+            # Preserve raw file ids for models needing per-sample info
+            batch['_file_ids_raw'] = batch.get('file_id')
+            # Convert tensor-based ID to a Python int for indexing metadata (legacy path)
             file_id = batch['file_id'][0].item()
             data_name = self.metadata[file_id]['Name']# .values
             # dataset_id = self.metadata[file_id]['Dataset_id'].item() 
@@ -150,9 +154,17 @@ class Default_task(pl.LightningModule):
         y_hat = self.forward(batch)
 
         # 2. 计算任务损失
+        extras = None
+        logits = y_hat
+        if isinstance(y_hat, dict):
+            extras = y_hat
+            logits = y_hat.get('logits', None)
+            if logits is None:
+                raise ValueError("Model dict output must contain 'logits'.")
+
         y = batch['y']
-        loss = self._compute_loss(y_hat, y)
-        y_argmax = torch.argmax(y_hat, dim=1) if y_hat.ndim > 1 else y_hat
+        loss = self._compute_loss(logits, y)
+        y_argmax = torch.argmax(logits, dim=1) if logits.ndim > 1 else logits
 
         # 3. 计算和记录指标
         step_metrics = {f"{stage}_loss": loss}
@@ -166,7 +178,18 @@ class Default_task(pl.LightningModule):
             if reg_type != 'total':
                 step_metrics[f"{stage}_{reg_type}_reg_loss"] = reg_loss_val
 
-        # 5. 计算总损失
+        # 5. Contrastive (optional)
+        if extras is not None and getattr(self.args_model, 'use_contrastive_head', False):
+            if hasattr(self.network, 'compute_contrastive_loss'):
+                contrastive_loss = self.network.compute_contrastive_loss(extras, y)
+                if isinstance(contrastive_loss, tuple):
+                    contrastive_total = contrastive_loss[0]
+                else:
+                    contrastive_total = contrastive_loss
+                step_metrics[f"{stage}_contrastive_loss"] = contrastive_total
+                loss = loss + getattr(self.args_model, 'lambda_contrastive', 0.0) * contrastive_total
+
+        # 6. 计算总损失
         total_loss = loss + reg_dict.get('total', torch.tensor(0.0, device=loss.device))
         step_metrics[f"{stage}_total_loss"] = total_loss
 
