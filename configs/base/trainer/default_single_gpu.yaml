@@ -1,8 +1,8 @@
 trainer:
   name: "Default_trainer"
   monitor: "val_loss"
-  num_epochs: 200
+  num_epochs: 100
   gpus: 1
   device: "cuda"
   early_stopping: true
-  patience: 100
+  patience: 50

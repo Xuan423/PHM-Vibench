@@ -1,9 +1,12 @@
 """Stability-based top-K selector for TSPN-CL.
 
 Scores each feature dimension by class separability vs. domain shift,
-tracks scores with EMA, and freezes the top-K set after warmup.
+tracks scores with EMA, and freezes the top-K indices after warmup.
+
+Note: Selection returns indices. Models may apply indices as a mask (no reorder)
+or as a gather (reorder) depending on the chosen integration.
 """
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 
@@ -68,32 +71,39 @@ class StabilityTopKSelector:
             self.running_score = m * self.running_score.to(device) + (1 - m) * score.detach().to(device)
         return self.running_score
 
-    def select(
+    def get_indices(self, num_features: int, device: torch.device) -> torch.Tensor:
+        """Return the current Top-K indices without updating scores.
+
+        Uses frozen indices if available; otherwise uses running_score if present;
+        falls back to the first K indices deterministically.
+        """
+        if self.frozen and self.frozen_idx is not None:
+            return self.frozen_idx.to(device)
+
+        if self.running_score is None or self.running_score.numel() != num_features:
+            return torch.arange(min(self.top_k, num_features), device=device)
+
+        scores = self.running_score.to(device)
+        tie_breaker = scores + 1e-12 * torch.arange(scores.numel(), device=device)
+        return torch.topk(tie_breaker, k=min(self.top_k, scores.numel()), dim=0).indices
+
+    def select_indices(
         self,
         h_raw: torch.Tensor,
         labels: torch.Tensor,
         domains: torch.Tensor,
         epoch: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Return selected features and indices.
+    ) -> torch.Tensor:
+        """Update scores and return Top-K indices (deterministic tie-break).
 
-        Freezes indices after warmup_epochs; ties broken by original order.
+        Freezes indices after warmup_epochs.
         """
         scores = self._compute_scores(h_raw, labels, domains)
 
         if (not self.frozen) and (epoch is not None) and (epoch >= self.warmup_epochs):
-            # tie-breaker by original order to make deterministic
             tie_breaker = scores + 1e-12 * torch.arange(scores.numel(), device=scores.device)
             topk_idx = torch.topk(tie_breaker, k=min(self.top_k, scores.numel()), dim=0).indices
             self.frozen_idx = topk_idx.detach()
             self.frozen = True
 
-        if self.frozen and self.frozen_idx is not None:
-            idx = self.frozen_idx.to(h_raw.device)
-        else:
-            tie_breaker = scores + 1e-12 * torch.arange(scores.numel(), device=scores.device)
-            idx = torch.topk(tie_breaker, k=min(self.top_k, scores.numel()), dim=0).indices
-            idx = idx.to(h_raw.device)
-
-        h_sel = h_raw[:, idx]
-        return h_sel, idx
+        return self.get_indices(num_features=h_raw.shape[1], device=h_raw.device)

@@ -11,44 +11,43 @@ base_configs:
 
 environment:
   project: "demo_tspn_cl_dg"
-  seed: 17
+  seed: 42
   output_dir: "results/demo/tspn_cl_dg"
   notes: "TSPN-CL concept head demo (DG)."
 
 task:
-  target_system_id: [19]
-  source_domain_id: [2, 4, 6, 8]
-  target_domain_id: [10]
+  target_system_id: [17]
+  source_domain_id: [0,1]
+  target_domain_id: [2]
 
 model:
   name: "TSPN_CL"
   type: "X_model"
   device: "cuda"
-  in_channels: 3
-  # Concept head / stability top-K / contrastive
-  use_physical_concept_head: false
+  in_channels: 1
+  # Metric head + stability Top-K (default fisher score, mask-based)
   use_contrastive_head: true
-  topk_mode: "score"          # default: keep order; set to "score" to enable fisher scoring
-  top_k_features: 64            # used when score mode or slicing
-  score_mode: "fisher_over_domain_var"
+  top_k_features: 208
   concept_dim: 32
-  projector_mode: "softmax"  # default bypass/linear; set "softmax" if needed
-  temperature: 0.07
-  lambda_cl_start: 0.05
-  lambda_cl_end: 0.5
-  lambda_cl_schedule: "linear"
-  lambda_phys_consistency: 0.5
+  temperature: 0.1
+  lambda_cl_start: 0.0 #0.05
+  lambda_cl_end: 0. #0.4
   topk_ema_momentum: 0.8
 
-  # Stage 2 K-shot calibration
+  # Stage 2 K-shot calibration (imprint on the same classifier head; optional metric tuning)
   stage2_enable: true
   stage2_k_shot: 10
-  stage2_freeze_backbone: true
-  stage2_finetune_classifier: true
-  prototype_metric: "cosine"
+  stage2_mode: "imprint"
+  stage2_tune_metric: true
+  stage2_steps: 100
+  stage2_lr_scale: 0.1          # actual lr = task.lr * lr_scale
+  stage2_lambda_prox: 0.001     # proximal constraint on metric head (V)
+  stage2_imprint_fusion: true
+  stage2_proto_n0: 10
+  stage2_use_temperature: true
+  stage2_temperature_init: 0.8
 
-  # Metric head & sparsity (optional)
-  metric_head: true
+  # Sparsity (optional, Stage1 config; Stage2 inherits)
   sparsity_enable: true
   sparsity_start_ratio: 0.25
   sparsity_coeff_row: 0.001

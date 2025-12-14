@@ -1,4 +1,12 @@
-"""TSPN-CL: TSPN backbone with concept head, stability top-K, and prototype InfoNCE."""
+"""TSPN-CL: TSPN backbone with stability Top-K mask, metric head, and Stage2 imprint hooks.
+
+This variant is the experimentation entry for concept/metric learning and few-shot
+adaptation. Deprecated "physical concept head" modes are removed; Top-K selection
+defaults to fisher score and is applied as a binary mask (no feature reordering).
+"""
+
+from __future__ import annotations
+
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -6,7 +14,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .TSPN import Model as TSPNBackbone
-from .utils.concept_projector import ConceptProjector
 from .utils.topk_selector import StabilityTopKSelector
 
 
@@ -16,108 +23,70 @@ class Model(nn.Module):
         self.args = args
         self.metadata = metadata
 
-        # Defaults for new flags
-        self.use_concept = (
-            getattr(args, "use_physical_concept_head", False)
-            or getattr(args, "use_contrastive_head", False)
-            or getattr(args, "metric_head", False)
-        )
-        self.use_contrastive = getattr(args, "use_contrastive_head", False)
-        self.metric_head = getattr(args, "metric_head", False)
-
-        self.top_k = getattr(args, "top_k_features", None)
-        self.topk_mode = getattr(args, "topk_mode", "identity")
-        self.concept_dim = getattr(args, "concept_dim", 32)
-        self.projector_mode = getattr(args, "projector_mode", "identity_or_linear")
-        self.score_mode = getattr(args, "score_mode", getattr(args, "topk_score_mode", "fisher_over_domain_var"))
-
-        self.lambda_cl_start = getattr(args, "lambda_cl_start", 0.0)
-        self.lambda_cl_end = getattr(args, "lambda_cl_end", getattr(args, "lambda_contrastive", 0.1))
-        self.lambda_cl_schedule = getattr(args, "lambda_cl_schedule", "linear")
-        self.temperature = getattr(args, "temperature", 0.07)
-        self.lambda_phys = getattr(args, "lambda_phys_consistency", 0.0)
-
-        self.sparsity_enable = getattr(args, "sparsity_enable", False)
-        self.sparsity_start_ratio = getattr(args, "sparsity_start_ratio", 0.7)
-        self.sparsity_coeff_row = getattr(args, "sparsity_coeff_row", 0.0)
-        self.sparsity_coeff_col = getattr(args, "sparsity_coeff_col", 0.0)
-
-        # Legacy top-k score params (used only when topk_mode=score)
-        self.topk_ema_momentum = getattr(args, "topk_ema_momentum", 0.9)
-        self.topk_warmup_epochs = getattr(args, "topk_warmup_epochs", 1)
-
-        # Backbone (reuses TSPN layers; classifier not used)
+        # Backbone (reuses TSPN layers; classifier inside backbone is not used here)
         self.backbone = TSPNBackbone(args, metadata)
-
         feature_dim = getattr(self.backbone, "channel_for_classifier", None)
         if feature_dim is None:
             raise ValueError("Backbone missing channel_for_classifier to define feature dimension.")
+        self.feature_dim = int(feature_dim)
 
-        if self.use_concept:
-            # Select top-k mode
-            if self.topk_mode not in ("identity", "score"):
-                raise ValueError(f"Unsupported topk_mode: {self.topk_mode}")
-            if self.topk_mode == "score" and self.top_k is None:
-                raise ValueError("top_k_features must be set when topk_mode=score.")
+        # Top-K selection: score-based by default (fisher_over_domain_var) and applied as mask.
+        self.top_k = int(getattr(args, "top_k_features", self.feature_dim))
+        self.top_k = max(1, min(self.top_k, self.feature_dim))
+        self.score_mode = getattr(args, "topk_score_mode", "fisher_over_domain_var")
+        self.topk_ema_momentum = getattr(args, "topk_ema_momentum", 0.9)
+        self.topk_warmup_epochs = getattr(args, "topk_warmup_epochs", 1)
+        self.topk_selector = StabilityTopKSelector(
+            top_k=self.top_k,
+            score_mode=self.score_mode,
+            ema_momentum=self.topk_ema_momentum,
+            warmup_epochs=self.topk_warmup_epochs,
+        )
 
-            self.topk_selector = (
-                StabilityTopKSelector(
-                    top_k=self.top_k,
-                    score_mode=self.score_mode,
-                    ema_momentum=self.topk_ema_momentum,
-                    warmup_epochs=self.topk_warmup_epochs,
-                )
-                if self.topk_mode == "score"
-                else None
-            )
+        # Metric head: c = V h_masked (V is the factor of a PSD metric M = V^T V).
+        self.concept_dim = int(getattr(args, "concept_dim", 32))
+        self.metric = nn.Linear(self.feature_dim, self.concept_dim, bias=False)
 
-            # Determine projector mode and output dim
-            sel_dim = self.top_k if self.top_k is not None else feature_dim
-            proj_mode = "softmax"
-            if self.projector_mode == "identity_or_linear":
-                proj_mode = "identity" if self.concept_dim == sel_dim else "linear"
-            elif self.projector_mode == "linear":
-                proj_mode = "linear"
-            elif self.projector_mode == "softmax":
-                proj_mode = "softmax"
-            else:
-                raise ValueError(f"Unsupported projector_mode: {self.projector_mode}")
+        # Classifier head(s): linear by default to support Stage2 weight imprinting.
+        self.heads = self._build_heads(args.num_classes, self.concept_dim)
 
-            proj_out_dim = sel_dim if proj_mode == "identity" else self.concept_dim
-            self.projector = ConceptProjector(
-                sel_dim,
-                proj_out_dim,
-                trainable=True,
-                mode=proj_mode,
-            )
-            classifier_in = proj_out_dim
-        else:
-            self.topk_selector = None
-            self.projector = None
-            classifier_in = feature_dim
+        # Contrastive schedule (linear only)
+        self.use_contrastive = bool(getattr(args, "use_contrastive_head", False))
+        self.lambda_cl_start = float(getattr(args, "lambda_cl_start", 0.0))
+        self.lambda_cl_end = float(getattr(args, "lambda_cl_end", 0.1))
+        self.temperature = float(getattr(args, "temperature", 0.07))
 
-        self.heads = self._build_heads(args.num_classes, classifier_in)
+        # Optional regularizers
+        self.sparsity_enable = bool(getattr(args, "sparsity_enable", False))
+        self.sparsity_start_ratio = float(getattr(args, "sparsity_start_ratio", 0.7))
+        self.sparsity_coeff_row = float(getattr(args, "sparsity_coeff_row", 0.0))
+        self.sparsity_coeff_col = float(getattr(args, "sparsity_coeff_col", 0.0))
 
-    def _build_heads(self, num_classes: Any, in_dim: int) -> nn.Module:
+        # Stage2 optional temperature (stored on model; does not create new classifier)
+        self.logit_temperature = float(getattr(args, "stage2_temperature_init", 1.0))
+
+    def _build_heads(self, num_classes: Any, in_dim: int) -> nn.ModuleDict:
         if isinstance(num_classes, dict):
-            module_dict = nn.ModuleDict()
-            for k, v in num_classes.items():
-                # module_dict[str(k)] = nn.Sequential(
-                #     nn.Linear(in_dim, 128),
-                #     nn.ReLU(),
-                #     nn.Linear(128, int(v)),
-                # )
-                module_dict[str(k)] = nn.Linear(in_dim, int(v))
-            return module_dict
-        return nn.ModuleDict({"default": nn.Sequential(nn.Linear(in_dim, 128), nn.ReLU(), nn.Linear(128, int(num_classes)))})
+            return nn.ModuleDict({str(k): nn.Linear(in_dim, int(v)) for k, v in num_classes.items()})
+        return nn.ModuleDict({"default": nn.Linear(in_dim, int(num_classes))})
 
     def _extract_features(self, x: torch.Tensor) -> torch.Tensor:
-        """Run backbone up to feature extractor, returning h_raw."""
+        """Run backbone up to feature extractor, returning h_raw (B x D)."""
         h = x
         for layer in self.backbone.signal_processing_layers:
             h = layer(h)
         h = self.backbone.feature_extractor_layers(h)
         return h
+
+    def _to_tensor_ids(self, file_ids_raw: Any, device: torch.device) -> torch.Tensor:
+        if file_ids_raw is None:
+            return torch.zeros(1, device=device, dtype=torch.long)
+        if torch.is_tensor(file_ids_raw):
+            return file_ids_raw.to(device).long()
+        try:
+            return torch.tensor(file_ids_raw, device=device, dtype=torch.long)
+        except Exception:
+            return torch.zeros(1, device=device, dtype=torch.long)
 
     def _get_domains(self, file_ids: torch.Tensor) -> torch.Tensor:
         if self.metadata is None:
@@ -143,16 +112,17 @@ class Model(nn.Module):
                 dataset_id = None
         if dataset_id and dataset_id in self.heads:
             return self.heads[dataset_id]
-        # fallback to first head deterministically
         return self.heads[sorted(self.heads.keys())[0]]
 
-    def forward(self, x: torch.Tensor, file_id=None, task_id=None):
-        """Legacy forward: returns logits only."""
-        h_raw = self._extract_features(x)
-        head = self._pick_head(None)
-        return head(h_raw)
+    def _topk_mask(self, idx: torch.Tensor, dim: int, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+        mask = torch.zeros(dim, device=device, dtype=dtype)
+        mask[idx] = 1.0
+        return mask
 
-    def forward_with_batch(self, batch: Dict[str, Any], epoch: int = 0) -> Dict[str, torch.Tensor]:
+    def encode_with_batch(
+        self, batch: Dict[str, Any], epoch: int = 0, *, update_topk: bool = True
+    ) -> Dict[str, torch.Tensor]:
+        """Return masked physical features and metric embeddings."""
         x = batch["x"]
         labels = batch.get("y")
         file_ids_raw = batch.get("_file_ids_raw", batch.get("file_id"))
@@ -161,64 +131,63 @@ class Model(nn.Module):
 
         h_raw = self._extract_features(x)
 
-        if not self.use_concept:
-            head = self._pick_head(file_ids_tensor)
-            logits = head(h_raw)
-            return {"logits": logits}
-
-        # Top-K selection
-        if self.topk_mode == "identity":
-            if self.top_k is not None:
-                h_sel = h_raw[:, : self.top_k]
-            else:
-                h_sel = h_raw
-            idx = torch.arange(h_sel.shape[1], device=h_sel.device)
+        if labels is None or not update_topk:
+            idx = self.topk_selector.get_indices(num_features=h_raw.shape[1], device=h_raw.device)
         else:
-            if labels is None:
-                # No labels => fall back to identity slice
-                h_sel = h_raw[:, : self.top_k]
-                idx = torch.arange(h_sel.shape[1], device=h_sel.device)
-            else:
-                h_sel, idx = self.topk_selector.select(h_raw, labels.to(h_raw.device), domains, epoch)
+            idx = self.topk_selector.select_indices(h_raw, labels.to(h_raw.device), domains, epoch)
 
-        c, W = self.projector(h_sel)
-        head = self._pick_head(file_ids_tensor)
-        logits = head(c)
+        mask = self._topk_mask(idx, dim=h_raw.shape[1], dtype=h_raw.dtype, device=h_raw.device)
+        h_masked = h_raw * mask
+        c = self.metric(h_masked)
 
         return {
-            "logits": logits,
             "c": c,
-            "h_sel": h_sel,
-            "W": W,
+            "h_raw": h_raw,
+            "h_masked": h_masked,
+            "topk_idx": idx,
+            "topk_mask": mask,
             "domains": domains,
             "labels": labels,
-            "epoch": epoch,
+            "file_ids": file_ids_tensor,
         }
 
-    def _to_tensor_ids(self, file_ids_raw: Any, device: torch.device) -> torch.Tensor:
-        if file_ids_raw is None:
-            return torch.zeros(1, device=device, dtype=torch.long)
-        if torch.is_tensor(file_ids_raw):
-            return file_ids_raw.to(device).long()
-        try:
-            return torch.tensor(file_ids_raw, device=device, dtype=torch.long)
-        except Exception:
-            return torch.zeros(1, device=device, dtype=torch.long)
+    def forward_with_batch(self, batch: Dict[str, Any], epoch: int = 0) -> Dict[str, torch.Tensor]:
+        extras = self.encode_with_batch(batch, epoch=epoch)
+        head = self._pick_head(extras.get("file_ids"))
+        logits = head(extras["c"]) / max(self.logit_temperature, 1e-6)
+        extras["logits"] = logits
+        extras["epoch"] = torch.tensor(int(epoch), device=logits.device)
+        return extras
+
+    def forward(self, x: torch.Tensor, file_id=None, task_id=None):
+        """Legacy forward: returns logits only (uses the first head)."""
+        h_raw = self._extract_features(x)
+        idx = self.topk_selector.get_indices(num_features=h_raw.shape[1], device=h_raw.device)
+        mask = self._topk_mask(idx, dim=h_raw.shape[1], dtype=h_raw.dtype, device=h_raw.device)
+        c = self.metric(h_raw * mask)
+        head = self._pick_head(None)
+        return head(c) / max(self.logit_temperature, 1e-6)
+
+    # --- Stage1 losses (contrastive + optional sparsity) ---
 
     def compute_contrastive_loss(
-        self, extras: Dict[str, torch.Tensor], labels: torch.Tensor, epoch: Optional[int] = None, total_epochs: Optional[int] = None
+        self,
+        extras: Dict[str, torch.Tensor],
+        labels: torch.Tensor,
+        epoch: Optional[int] = None,
+        total_epochs: Optional[int] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, float]:
         c = extras["c"]
-        h_sel = extras["h_sel"]
-        W = extras["W"]
         labels = labels.to(c.device)
 
         proto_labels, prototypes = self._compute_prototypes(c, labels)
         L_info = self._info_nce(c, prototypes, labels, proto_labels)
-        L_phys = self._physical_consistency(h_sel, prototypes, proto_labels, W, labels)
-        sparsity_pen = self._sparsity_penalty(W, epoch, total_epochs)
+
+        sparsity_pen = self._sparsity_penalty(epoch, total_epochs)
         lambda_w = self._scheduled_lambda(epoch, total_epochs)
-        total = L_info + self.lambda_phys * L_phys + sparsity_pen
+
+        L_phys = torch.tensor(0.0, device=c.device, dtype=c.dtype)
+        total = L_info + sparsity_pen
         return total, L_info, L_phys, sparsity_pen, lambda_w
 
     def _compute_prototypes(self, c: torch.Tensor, labels: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -238,57 +207,43 @@ class Model(nn.Module):
         labels: torch.Tensor,
         proto_labels: torch.Tensor,
     ) -> torch.Tensor:
-        # cosine similarity
-        sim = F.cosine_similarity(
-            c.unsqueeze(1),
-            prototypes.unsqueeze(0),
-            dim=-1,
-        )  # [B, P]
-        logits = sim / self.temperature
-        # map each label to proto index
+        sim = F.cosine_similarity(c.unsqueeze(1), prototypes.unsqueeze(0), dim=-1)  # [B, P]
+        logits = sim / max(self.temperature, 1e-6)
         label_to_idx = {int(lbl.item()): idx for idx, lbl in enumerate(proto_labels)}
         target = torch.tensor([label_to_idx[int(l.item())] for l in labels], device=c.device)
         return F.cross_entropy(logits, target)
 
-    def _physical_consistency(
-        self,
-        h_sel: torch.Tensor,
-        prototypes: torch.Tensor,
-        proto_labels: torch.Tensor,
-        W: torch.Tensor,
-        labels: torch.Tensor,
-    ) -> torch.Tensor:
-        # project prototypes to physical space
-        p_phys = torch.matmul(W.t(), prototypes.t()).t()  # [P, K]
-        p_phys = F.normalize(p_phys, dim=-1)
-        mu_phys = []
-        for lbl in proto_labels:
-            mask = labels == lbl
-            if mask.sum() == 0:
-                mu = torch.zeros_like(h_sel[0])
-            else:
-                mu = h_sel[mask].mean(dim=0)
-            mu = F.normalize(mu, dim=-1)
-            mu_phys.append(mu)
-        mu_phys = torch.stack(mu_phys, dim=0)  # [P, K]
-        return torch.norm(p_phys - mu_phys, dim=1).mean()
-
     def _scheduled_lambda(self, epoch: Optional[int], total_epochs: Optional[int]) -> float:
         if epoch is None or total_epochs is None or total_epochs <= 0:
             return float(self.lambda_cl_end)
-        if self.lambda_cl_schedule != "linear":
-            raise ValueError(f"Unsupported lambda_cl_schedule: {self.lambda_cl_schedule}")
         ratio = min(max(epoch / max(total_epochs - 1, 1), 0.0), 1.0)
         return float(self.lambda_cl_start + (self.lambda_cl_end - self.lambda_cl_start) * ratio)
 
-    def _sparsity_penalty(self, W: torch.Tensor, epoch: Optional[int], total_epochs: Optional[int]) -> torch.Tensor:
+    def _sparsity_penalty(self, epoch: Optional[int], total_epochs: Optional[int]) -> torch.Tensor:
         if not self.sparsity_enable:
-            return torch.tensor(0.0, device=W.device, dtype=W.dtype)
+            return torch.tensor(0.0, device=self.metric.weight.device, dtype=self.metric.weight.dtype)
         if epoch is None or total_epochs is None or total_epochs <= 0:
-            return torch.tensor(0.0, device=W.device, dtype=W.dtype)
+            return torch.tensor(0.0, device=self.metric.weight.device, dtype=self.metric.weight.dtype)
         if (epoch / max(total_epochs, 1)) < self.sparsity_start_ratio:
-            return torch.tensor(0.0, device=W.device, dtype=W.dtype)
+            return torch.tensor(0.0, device=self.metric.weight.device, dtype=self.metric.weight.dtype)
 
-        row_pen = torch.norm(W, p=1, dim=1).mean() if self.sparsity_coeff_row > 0 else torch.tensor(0.0, device=W.device, dtype=W.dtype)
-        col_pen = torch.norm(W, p=2, dim=0).mean() if self.sparsity_coeff_col > 0 else torch.tensor(0.0, device=W.device, dtype=W.dtype)
+        V = self.metric.weight  # [R, D]
+        row_pen = torch.norm(V, p=1, dim=1).mean() if self.sparsity_coeff_row > 0 else torch.tensor(0.0, device=V.device, dtype=V.dtype)
+        col_pen = torch.norm(V, p=2, dim=0).mean() if self.sparsity_coeff_col > 0 else torch.tensor(0.0, device=V.device, dtype=V.dtype)
         return self.sparsity_coeff_row * row_pen + self.sparsity_coeff_col * col_pen
+
+    # --- Stage2 helpers ---
+
+    def get_active_linear_head(self, file_ids: Optional[torch.Tensor]) -> nn.Linear:
+        """Return the active classifier head as an nn.Linear (for Stage2 imprint).
+
+        This returns the same module instance used during forward. No new modules
+        are created.
+        """
+        head = self._pick_head(file_ids)
+        if isinstance(head, nn.Linear):
+            return head
+        # Allow Sequential but require last layer to be Linear.
+        if isinstance(head, nn.Sequential) and len(head) > 0 and isinstance(head[-1], nn.Linear):
+            return head[-1]
+        raise TypeError(f"Unsupported head type for imprinting: {type(head)}")
