@@ -17,16 +17,32 @@ class Model(nn.Module):
         self.metadata = metadata
 
         # Defaults for new flags
-        self.use_concept = getattr(args, "use_physical_concept_head", False) or getattr(
-            args, "use_contrastive_head", False
+        self.use_concept = (
+            getattr(args, "use_physical_concept_head", False)
+            or getattr(args, "use_contrastive_head", False)
+            or getattr(args, "metric_head", False)
         )
         self.use_contrastive = getattr(args, "use_contrastive_head", False)
+        self.metric_head = getattr(args, "metric_head", False)
+
         self.top_k = getattr(args, "top_k_features", None)
+        self.topk_mode = getattr(args, "topk_mode", "identity")
         self.concept_dim = getattr(args, "concept_dim", 32)
-        self.lambda_contrastive = getattr(args, "lambda_contrastive", 0.1)
+        self.projector_mode = getattr(args, "projector_mode", "identity_or_linear")
+        self.score_mode = getattr(args, "score_mode", getattr(args, "topk_score_mode", "fisher_over_domain_var"))
+
+        self.lambda_cl_start = getattr(args, "lambda_cl_start", 0.0)
+        self.lambda_cl_end = getattr(args, "lambda_cl_end", getattr(args, "lambda_contrastive", 0.1))
+        self.lambda_cl_schedule = getattr(args, "lambda_cl_schedule", "linear")
         self.temperature = getattr(args, "temperature", 0.07)
         self.lambda_phys = getattr(args, "lambda_phys_consistency", 0.0)
-        self.topk_score_mode = getattr(args, "topk_score_mode", "fisher_over_domain_var")
+
+        self.sparsity_enable = getattr(args, "sparsity_enable", False)
+        self.sparsity_start_ratio = getattr(args, "sparsity_start_ratio", 0.7)
+        self.sparsity_coeff_row = getattr(args, "sparsity_coeff_row", 0.0)
+        self.sparsity_coeff_col = getattr(args, "sparsity_coeff_col", 0.0)
+
+        # Legacy top-k score params (used only when topk_mode=score)
         self.topk_ema_momentum = getattr(args, "topk_ema_momentum", 0.9)
         self.topk_warmup_epochs = getattr(args, "topk_warmup_epochs", 1)
 
@@ -38,16 +54,43 @@ class Model(nn.Module):
             raise ValueError("Backbone missing channel_for_classifier to define feature dimension.")
 
         if self.use_concept:
-            if self.top_k is None:
-                raise ValueError("top_k_features must be set when concept head is enabled.")
-            self.topk_selector = StabilityTopKSelector(
-                top_k=self.top_k,
-                score_mode=self.topk_score_mode,
-                ema_momentum=self.topk_ema_momentum,
-                warmup_epochs=self.topk_warmup_epochs,
+            # Select top-k mode
+            if self.topk_mode not in ("identity", "score"):
+                raise ValueError(f"Unsupported topk_mode: {self.topk_mode}")
+            if self.topk_mode == "score" and self.top_k is None:
+                raise ValueError("top_k_features must be set when topk_mode=score.")
+
+            self.topk_selector = (
+                StabilityTopKSelector(
+                    top_k=self.top_k,
+                    score_mode=self.score_mode,
+                    ema_momentum=self.topk_ema_momentum,
+                    warmup_epochs=self.topk_warmup_epochs,
+                )
+                if self.topk_mode == "score"
+                else None
             )
-            self.projector = ConceptProjector(self.top_k, self.concept_dim)
-            classifier_in = self.concept_dim
+
+            # Determine projector mode and output dim
+            sel_dim = self.top_k if self.top_k is not None else feature_dim
+            proj_mode = "softmax"
+            if self.projector_mode == "identity_or_linear":
+                proj_mode = "identity" if self.concept_dim == sel_dim else "linear"
+            elif self.projector_mode == "linear":
+                proj_mode = "linear"
+            elif self.projector_mode == "softmax":
+                proj_mode = "softmax"
+            else:
+                raise ValueError(f"Unsupported projector_mode: {self.projector_mode}")
+
+            proj_out_dim = sel_dim if proj_mode == "identity" else self.concept_dim
+            self.projector = ConceptProjector(
+                sel_dim,
+                proj_out_dim,
+                trainable=True,
+                mode=proj_mode,
+            )
+            classifier_in = proj_out_dim
         else:
             self.topk_selector = None
             self.projector = None
@@ -123,12 +166,20 @@ class Model(nn.Module):
             logits = head(h_raw)
             return {"logits": logits}
 
-        if labels is None:
-            # In inference, skip scoring update if labels missing
-            h_sel = h_raw[:, : self.top_k]
+        # Top-K selection
+        if self.topk_mode == "identity":
+            if self.top_k is not None:
+                h_sel = h_raw[:, : self.top_k]
+            else:
+                h_sel = h_raw
             idx = torch.arange(h_sel.shape[1], device=h_sel.device)
         else:
-            h_sel, idx = self.topk_selector.select(h_raw, labels.to(h_raw.device), domains, epoch)
+            if labels is None:
+                # No labels => fall back to identity slice
+                h_sel = h_raw[:, : self.top_k]
+                idx = torch.arange(h_sel.shape[1], device=h_sel.device)
+            else:
+                h_sel, idx = self.topk_selector.select(h_raw, labels.to(h_raw.device), domains, epoch)
 
         c, W = self.projector(h_sel)
         head = self._pick_head(file_ids_tensor)
@@ -141,6 +192,7 @@ class Model(nn.Module):
             "W": W,
             "domains": domains,
             "labels": labels,
+            "epoch": epoch,
         }
 
     def _to_tensor_ids(self, file_ids_raw: Any, device: torch.device) -> torch.Tensor:
@@ -153,7 +205,9 @@ class Model(nn.Module):
         except Exception:
             return torch.zeros(1, device=device, dtype=torch.long)
 
-    def compute_contrastive_loss(self, extras: Dict[str, torch.Tensor], labels: torch.Tensor) -> torch.Tensor:
+    def compute_contrastive_loss(
+        self, extras: Dict[str, torch.Tensor], labels: torch.Tensor, epoch: Optional[int] = None, total_epochs: Optional[int] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, float]:
         c = extras["c"]
         h_sel = extras["h_sel"]
         W = extras["W"]
@@ -162,7 +216,10 @@ class Model(nn.Module):
         proto_labels, prototypes = self._compute_prototypes(c, labels)
         L_info = self._info_nce(c, prototypes, labels, proto_labels)
         L_phys = self._physical_consistency(h_sel, prototypes, proto_labels, W, labels)
-        return L_info + self.lambda_phys * L_phys, L_info, L_phys
+        sparsity_pen = self._sparsity_penalty(W, epoch, total_epochs)
+        lambda_w = self._scheduled_lambda(epoch, total_epochs)
+        total = L_info + self.lambda_phys * L_phys + sparsity_pen
+        return total, L_info, L_phys, sparsity_pen, lambda_w
 
     def _compute_prototypes(self, c: torch.Tensor, labels: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         uniq = labels.unique()
@@ -215,3 +272,23 @@ class Model(nn.Module):
             mu_phys.append(mu)
         mu_phys = torch.stack(mu_phys, dim=0)  # [P, K]
         return torch.norm(p_phys - mu_phys, dim=1).mean()
+
+    def _scheduled_lambda(self, epoch: Optional[int], total_epochs: Optional[int]) -> float:
+        if epoch is None or total_epochs is None or total_epochs <= 0:
+            return float(self.lambda_cl_end)
+        if self.lambda_cl_schedule != "linear":
+            raise ValueError(f"Unsupported lambda_cl_schedule: {self.lambda_cl_schedule}")
+        ratio = min(max(epoch / max(total_epochs - 1, 1), 0.0), 1.0)
+        return float(self.lambda_cl_start + (self.lambda_cl_end - self.lambda_cl_start) * ratio)
+
+    def _sparsity_penalty(self, W: torch.Tensor, epoch: Optional[int], total_epochs: Optional[int]) -> torch.Tensor:
+        if not self.sparsity_enable:
+            return torch.tensor(0.0, device=W.device, dtype=W.dtype)
+        if epoch is None or total_epochs is None or total_epochs <= 0:
+            return torch.tensor(0.0, device=W.device, dtype=W.dtype)
+        if (epoch / max(total_epochs, 1)) < self.sparsity_start_ratio:
+            return torch.tensor(0.0, device=W.device, dtype=W.dtype)
+
+        row_pen = torch.norm(W, p=1, dim=1).mean() if self.sparsity_coeff_row > 0 else torch.tensor(0.0, device=W.device, dtype=W.dtype)
+        col_pen = torch.norm(W, p=2, dim=0).mean() if self.sparsity_coeff_col > 0 else torch.tensor(0.0, device=W.device, dtype=W.dtype)
+        return self.sparsity_coeff_row * row_pen + self.sparsity_coeff_col * col_pen

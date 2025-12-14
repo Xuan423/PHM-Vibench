@@ -181,13 +181,27 @@ class Default_task(pl.LightningModule):
         # 5. Contrastive (optional)
         if extras is not None and getattr(self.args_model, 'use_contrastive_head', False):
             if hasattr(self.network, 'compute_contrastive_loss'):
-                contrastive_loss = self.network.compute_contrastive_loss(extras, y)
+                total_epochs = getattr(self.args_trainer, "num_epochs", None)
+                contrastive_loss = self.network.compute_contrastive_loss(
+                    extras,
+                    y,
+                    getattr(self, "current_epoch", 0),
+                    total_epochs,
+                )
+                lambda_w = getattr(self.args_model, "lambda_contrastive", 0.0)
+                sparsity_pen = None
                 if isinstance(contrastive_loss, tuple):
-                    contrastive_total = contrastive_loss[0]
+                    # (total, L_info, L_phys, sparsity_penalty, lambda_schedule)
+                    base_total = contrastive_loss[0]
+                    sparsity_pen = contrastive_loss[3] if len(contrastive_loss) > 3 else None
+                    lambda_w = contrastive_loss[4] if len(contrastive_loss) > 4 else lambda_w
                 else:
-                    contrastive_total = contrastive_loss
-                step_metrics[f"{stage}_contrastive_loss"] = contrastive_total
-                loss = loss + getattr(self.args_model, 'lambda_contrastive', 0.0) * contrastive_total
+                    base_total = contrastive_loss
+                weighted_contrastive = lambda_w * base_total
+                step_metrics[f"{stage}_contrastive_loss"] = weighted_contrastive
+                if sparsity_pen is not None:
+                    step_metrics[f"{stage}_sparsity_penalty"] = sparsity_pen
+                loss = loss + weighted_contrastive
 
         # 6. 计算总损失
         total_loss = loss + reg_dict.get('total', torch.tensor(0.0, device=loss.device))
