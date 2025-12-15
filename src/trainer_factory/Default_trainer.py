@@ -97,6 +97,14 @@ def call_backs(args, path):
     
     callback_list = [checkpoint_callback]
 
+    # Optional diagnostics exports (TSPN_CL): safe to attach globally; writes only when enabled on the model.
+    try:
+        from src.trainer_factory.callbacks.tspn_cl_diagnostics import TSPNCLDiagnosticsCallback
+
+        callback_list.append(TSPNCLDiagnosticsCallback(output_dir=path))
+    except Exception as e:  # pragma: no cover - best-effort optional callback
+        print(f"[WARN] Failed to attach TSPNCLDiagnosticsCallback: {e}")
+
     # 模型修剪回调（根据需求添加）
     if getattr(args, "pruning", 0.0):
         prune_callback = Prune_callback(args)

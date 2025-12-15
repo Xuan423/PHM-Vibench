@@ -12,7 +12,6 @@ model:
   skip_connection: true
   in_dim: 4096
   out_dim: 4096
-  in_channels: 6 # TODO: modify according to data
   out_channels: 4
   scale: 4
   f_c_mu: 0.0

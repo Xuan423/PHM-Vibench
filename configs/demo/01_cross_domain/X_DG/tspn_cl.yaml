@@ -24,14 +24,13 @@ model:
   name: "TSPN_CL"
   type: "X_model"
   device: "cuda"
-  in_channels: 1
   # Metric head + stability Top-K (default fisher score, mask-based)
   use_contrastive_head: true
-  top_k_features: 208
+  top_k_features: 64
   concept_dim: 32
   temperature: 0.1
-  lambda_cl_start: 0.0 #0.05
-  lambda_cl_end: 0. #0.4
+  lambda_cl_start: 0.05 #0.05
+  lambda_cl_end: 0.4 #0.4
   topk_ema_momentum: 0.8
 
   # Stage 2 K-shot calibration (imprint on the same classifier head; optional metric tuning)

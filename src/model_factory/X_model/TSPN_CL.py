@@ -65,6 +65,9 @@ class Model(nn.Module):
         # Stage2 optional temperature (stored on model; does not create new classifier)
         self.logit_temperature = float(getattr(args, "stage2_temperature_init", 1.0))
 
+        # Optional diagnostics exports (Top-K + sparsity). Off by default.
+        self.export_diagnostics = bool(getattr(args, "export_diagnostics", False))
+
     def _build_heads(self, num_classes: Any, in_dim: int) -> nn.ModuleDict:
         if isinstance(num_classes, dict):
             return nn.ModuleDict({str(k): nn.Linear(in_dim, int(v)) for k, v in num_classes.items()})

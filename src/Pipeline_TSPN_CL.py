@@ -3,10 +3,12 @@ import os
 import pandas as pd
 import torch
 from pytorch_lightning import seed_everything
+from torch.utils.data import DataLoader, Subset
 
 from src.configs.config_utils import merge_with_local_override, path_name, transfer_namespace
 from src.utils.config_utils import parse_overrides, apply_overrides_to_config
-from src.utils.utils import init_lab, close_lab, load_best_model_checkpoint
+from src.utils.stage2_protocol import build_support_query_split, validate_split, write_split_json
+from src.utils.utils import init_lab, close_lab, load_best_model_checkpoint, get_num_channels
 from src.data_factory import build_data
 from src.model_factory import build_model
 from src.task_factory import build_task
@@ -15,7 +17,7 @@ from src.trainer_factory import build_trainer
 
 def _run_stage2_imprint(
     model,
-    dataloader,
+    support_loader,
     k_shot: int,
     *,
     imprint_fusion: bool = True,
@@ -38,12 +40,11 @@ def _run_stage2_imprint(
     model.eval()
 
     support = {}
-    queries = []
     head = None
     head_id = None
 
     with torch.no_grad():
-        for batch in dataloader:
+        for batch in support_loader:
             batch["x"] = batch["x"].to(device)
             batch["y"] = batch["y"].to(device)
             out = model.encode_with_batch(batch, epoch=999, update_topk=False)
@@ -54,12 +55,9 @@ def _run_stage2_imprint(
                 head_id = id(head)
             for i in range(c.size(0)):
                 label = int(batch["y"][i].item())
-                if len(support.get(label, [])) < k_shot:
-                    support.setdefault(label, []).append(c[i].detach())
-                else:
-                    queries.append((c[i].detach(), label))
+                support.setdefault(label, []).append(c[i].detach())
 
-    if head is None or not support or not queries:
+    if head is None or not support:
         return None
 
     weight_before = head.weight.detach().clone()
@@ -81,15 +79,6 @@ def _run_stage2_imprint(
         if use_temperature:
             model.logit_temperature = float(temperature_init)
 
-    # Evaluate on cached queries using the same head instance
-    T = float(getattr(model, "logit_temperature", 1.0)) if use_temperature else 1.0
-    correct = 0
-    for q, lbl in queries:
-        logits = head(q.unsqueeze(0)) / max(T, 1e-6)
-        pred = int(torch.argmax(logits, dim=1).item())
-        correct += int(pred == lbl)
-    acc = correct / max(len(queries), 1)
-
     head_same = id(head) == head_id
     changed = not torch.allclose(head.weight.detach(), weight_before)
     return {
@@ -98,19 +87,17 @@ def _run_stage2_imprint(
         "imprint_fusion": bool(imprint_fusion),
         "proto_n0": float(proto_n0),
         "use_temperature": bool(use_temperature),
-        "temperature": float(T),
-        "accuracy": float(acc),
+        "temperature": float(getattr(model, "logit_temperature", 1.0)),
         "head_instance_unchanged": bool(head_same),
         "weights_changed": bool(changed),
         "num_support_classes": int(len(support)),
-        "num_queries": int(len(queries)),
         "bias_updated": bool(bias_before is not None),
     }
 
 
 def _run_stage2_tune_metric_and_imprint(
     model,
-    dataloader,
+    support_loader,
     k_shot: int,
     *,
     steps: int = 100,
@@ -138,7 +125,7 @@ def _run_stage2_tune_metric_and_imprint(
     support_file_ids = []
 
     with torch.no_grad():
-        for batch in dataloader:
+        for batch in support_loader:
             x = batch["x"]
             y = batch["y"]
             file_id = batch.get("file_id")
@@ -262,26 +249,6 @@ def _run_stage2_tune_metric_and_imprint(
                 head.bias.data[lbl].zero_()
 
     # Pass 2: evaluate on queries (skip first K per class as support).
-    support_counts = {}
-    correct = 0
-    total = 0
-    T = float(getattr(model, "logit_temperature", 1.0)) if use_temperature else 1.0
-    with torch.no_grad():
-        for batch in dataloader:
-            batch["x"] = batch["x"].to(device)
-            batch["y"] = batch["y"].to(device)
-            extras = model.encode_with_batch(batch, epoch=999, update_topk=False)
-            logits = head(extras["c"]) / max(T, 1e-6)
-            preds = torch.argmax(logits, dim=1)
-            for i in range(preds.size(0)):
-                lbl = int(batch["y"][i].item())
-                if support_counts.get(lbl, 0) < k_shot:
-                    support_counts[lbl] = support_counts.get(lbl, 0) + 1
-                    continue
-                total += 1
-                correct += int(int(preds[i].item()) == lbl)
-
-    acc = correct / max(total, 1)
     return {
         "k_shot": int(k_shot),
         "mode": "tune_metric+imprint",
@@ -291,10 +258,34 @@ def _run_stage2_tune_metric_and_imprint(
         "imprint_fusion": bool(imprint_fusion),
         "proto_n0": float(proto_n0),
         "use_temperature": bool(use_temperature),
-        "temperature": float(T),
-        "accuracy": float(acc),
+        "temperature": float(getattr(model, "logit_temperature", 1.0)),
         "head_instance_unchanged": bool(id(head) == head_id),
     }
+
+
+def _make_subset_loader(
+    base_dataset,
+    indices,
+    *,
+    batch_size: int,
+    num_workers: int,
+    pin_memory: bool,
+    shuffle: bool,
+    seed: int,
+):
+    subset = Subset(base_dataset, indices)
+    generator = None
+    if shuffle:
+        generator = torch.Generator()
+        generator.manual_seed(int(seed))
+    return DataLoader(
+        subset,
+        batch_size=int(batch_size),
+        shuffle=bool(shuffle),
+        num_workers=int(num_workers),
+        pin_memory=bool(pin_memory),
+        generator=generator,
+    )
 
 
 def pipeline(args):
@@ -339,6 +330,31 @@ def pipeline(args):
 
         print("[INFO] 构建数据工厂...")
         data_factory = build_data(args_data, args_task)
+
+        # Infer TSPN/TSPN_CL in_channels from metadata (preferred over YAML).
+        channels_map = None
+        try:
+            channels_map = get_num_channels(data_factory.get_metadata())
+        except Exception as e:
+            print(f"[WARN] Failed to read in_channels from metadata: {e}")
+
+        if channels_map:
+            target_ids = getattr(args_task, "target_system_id", None)
+            if target_ids:
+                target_ids_set = {int(x) for x in target_ids}
+                channels_map = {int(k): int(v) for k, v in channels_map.items() if int(k) in target_ids_set}
+            uniq = sorted({int(v) for v in channels_map.values()})
+            if len(uniq) == 1:
+                inferred = int(uniq[0])
+                if getattr(args_model, "in_channels", None) is not None and int(getattr(args_model, "in_channels")) != inferred:
+                    print(
+                        f"[WARN] model.in_channels={getattr(args_model, 'in_channels')} will be overridden by "
+                        f"inferred in_channels={inferred} from metadata."
+                    )
+                args_model.in_channels = inferred
+            elif len(uniq) > 1:
+                raise ValueError(f"Inconsistent in_channels across dataset_ids: {channels_map}")
+
         print("[INFO] 构建模型...")
         model = build_model(args_model, metadata=data_factory.get_metadata())
 
@@ -361,8 +377,8 @@ def pipeline(args):
 
         print("[INFO] 加载最佳模型并测试...")
         task = load_best_model_checkpoint(task, trainer)
-        result = trainer.test(task, data_factory.get_dataloader("test"))
-        data_factory.data.close()
+        test_loader = data_factory.get_dataloader("test")
+        result = trainer.test(task, test_loader)
         all_results.append(result[0])
 
         print("[INFO] 保存测试结果...")
@@ -371,42 +387,93 @@ def pipeline(args):
 
         # Stage2 K-shot calibration (optional)
         if getattr(args_model, "stage2_enable", False) and getattr(args_model, "stage2_k_shot", 0) > 0:
-            print("[INFO] Stage2 K-shot 校准...")
-            model.eval()
+            print("[INFO] Stage2 K-shot 校准 (test-episodic: test -> support+query)...")
+            task.network.eval()
             stage2_mode = getattr(args_model, "stage2_mode", "imprint")
             if stage2_mode != "imprint":
                 print(f"[WARN] 未知 stage2_mode={stage2_mode}，跳过 Stage2。")
-                kshot_res = None
             else:
-                if getattr(args_model, "stage2_tune_metric", False):
-                    kshot_res = _run_stage2_tune_metric_and_imprint(
-                        task.network,
-                        data_factory.get_dataloader("test"),
-                        k_shot=getattr(args_model, "stage2_k_shot", 0),
-                        steps=getattr(args_model, "stage2_steps", 100),
-                        base_lr=getattr(args_task, "lr", 1e-3),
-                        lr_scale=getattr(args_model, "stage2_lr_scale", 0.1),
-                        lambda_prox=getattr(args_model, "stage2_lambda_prox", 1e-3),
-                        imprint_fusion=getattr(args_model, "stage2_imprint_fusion", True),
-                        proto_n0=getattr(args_model, "stage2_proto_n0", 5.0),
-                        use_temperature=getattr(args_model, "stage2_use_temperature", True),
-                        temperature_init=getattr(args_model, "stage2_temperature_init", 1.0),
-                    )
+                test_dataset = data_factory.get_dataset("test")
+                split_seed = int(getattr(args_model, "stage2_split_seed", current_seed))
+                k_shot = int(getattr(args_model, "stage2_k_shot", 0))
+                split = build_support_query_split(test_dataset, k_shot=k_shot, seed=split_seed)
+                ok, issues = validate_split(split, dataset_len=len(test_dataset))
+                if not ok:
+                    raise ValueError(f"Invalid stage2 split: {issues}")
+
+                split_path = os.path.join(path, "stage2_split.json")
+                write_split_json(split, split_path)
+
+                # Build loaders (support is the only set allowed for Stage2 updates).
+                support_loader = _make_subset_loader(
+                    test_dataset,
+                    split.support_indices,
+                    batch_size=getattr(args_data, "batch_size", 32),
+                    num_workers=getattr(args_data, "num_workers", 0),
+                    pin_memory=bool(getattr(args_data, "pin_memory", False)),
+                    shuffle=True,
+                    seed=split_seed,
+                )
+                query_loader = _make_subset_loader(
+                    test_dataset,
+                    split.query_indices,
+                    batch_size=getattr(args_data, "batch_size", 32),
+                    num_workers=getattr(args_data, "num_workers", 0),
+                    pin_memory=bool(getattr(args_data, "pin_memory", False)),
+                    shuffle=False,
+                    seed=split_seed,
+                )
+
+                # Stage1 query-only metrics (control) on the exact same query subset.
+                stage1_query = trainer.test(task, query_loader)
+                stage1_query_df = pd.DataFrame([stage1_query[0]])
+                stage1_query_df["stage2_split_path"] = split_path
+                stage1_query_df.to_csv(os.path.join(path, f"stage1_query_metrics_{it}.csv"), index=False)
+
+                # Skip Stage2 if any class lacks K support (still keep split metadata + Stage1 query metrics).
+                insufficient = [lbl for lbl, v in split.support_indices_by_class.items() if len(v) < k_shot]
+                if insufficient:
+                    print(f"[WARN] Stage2 skipped: some classes have <K samples (K={k_shot}): {insufficient}")
                 else:
-                    kshot_res = _run_stage2_imprint(
-                        task.network,
-                        data_factory.get_dataloader("test"),
-                        k_shot=getattr(args_model, "stage2_k_shot", 0),
-                        imprint_fusion=getattr(args_model, "stage2_imprint_fusion", True),
-                        proto_n0=getattr(args_model, "stage2_proto_n0", 5.0),
-                        use_temperature=getattr(args_model, "stage2_use_temperature", True),
-                        temperature_init=getattr(args_model, "stage2_temperature_init", 1.0),
-                    )
-            if kshot_res:
-                print(f"[INFO] Stage2 K-shot 结果: {kshot_res}")
-                pd.DataFrame([kshot_res]).to_csv(os.path.join(path, f"kshot_result_{it}.csv"), index=False)
-            else:
-                print("[WARN] Stage2 K-shot 未生成结果（可能支持/查询不足）。")
+                    if getattr(args_model, "stage2_tune_metric", False):
+                        kshot_res = _run_stage2_tune_metric_and_imprint(
+                            task.network,
+                            support_loader,
+                            k_shot=k_shot,
+                            steps=getattr(args_model, "stage2_steps", 100),
+                            base_lr=getattr(args_task, "lr", 1e-3),
+                            lr_scale=getattr(args_model, "stage2_lr_scale", 0.1),
+                            lambda_prox=getattr(args_model, "stage2_lambda_prox", 1e-3),
+                            imprint_fusion=getattr(args_model, "stage2_imprint_fusion", True),
+                            proto_n0=getattr(args_model, "stage2_proto_n0", 5.0),
+                            use_temperature=getattr(args_model, "stage2_use_temperature", True),
+                            temperature_init=getattr(args_model, "stage2_temperature_init", 1.0),
+                        )
+                    else:
+                        kshot_res = _run_stage2_imprint(
+                            task.network,
+                            support_loader,
+                            k_shot=k_shot,
+                            imprint_fusion=getattr(args_model, "stage2_imprint_fusion", True),
+                            proto_n0=getattr(args_model, "stage2_proto_n0", 5.0),
+                            use_temperature=getattr(args_model, "stage2_use_temperature", True),
+                            temperature_init=getattr(args_model, "stage2_temperature_init", 1.0),
+                        )
+
+                    if kshot_res:
+                        kshot_df = pd.DataFrame([kshot_res])
+                        kshot_df["stage2_split_path"] = split_path
+                        kshot_df.to_csv(os.path.join(path, f"stage2_adapt_{it}.csv"), index=False)
+                        # Backward-compatible alias (older runs expected this filename).
+                        kshot_df.to_csv(os.path.join(path, f"kshot_result_{it}.csv"), index=False)
+
+                    # Stage2 query-only metrics on the exact same query subset.
+                    stage2_query = trainer.test(task, query_loader)
+                    stage2_query_df = pd.DataFrame([stage2_query[0]])
+                    stage2_query_df["stage2_split_path"] = split_path
+                    stage2_query_df.to_csv(os.path.join(path, f"stage2_query_metrics_{it}.csv"), index=False)
+
+        data_factory.data.close()
 
         close_lab()
 

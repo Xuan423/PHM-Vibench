@@ -21,6 +21,8 @@ from typing import Any, Dict, Tuple, Union, Optional
 
 import yaml
 
+import warnings
+
 
 # ==================== 预设配置模板映射 ====================
 
@@ -176,6 +178,9 @@ def load_config(config_source: Union[str, Path, Dict, SimpleNamespace],
 
     # 步骤3: 验证必需字段
     _validate_config_wrapper(config)
+
+    # 步骤4: 规范化（仅告警 + 向后兼容字段对齐；不做破坏性修改）
+    normalize_config(config)
 
     return config
 
@@ -526,6 +531,73 @@ def merge_with_local_override(
         return load_config(base_cfg, default_local)
 
     return base_cfg
+
+
+def _warn_duplicate_concept(message: str) -> None:
+    # warnings.warn is easier to capture in tests than print().
+    warnings.warn(message, category=UserWarning, stacklevel=2)
+
+
+def normalize_config(config: ConfigWrapper) -> ConfigWrapper:
+    """Normalize config semantics and warn on duplicated concepts.
+
+    This function keeps backward compatibility by:
+    - emitting warnings when the same concept appears in multiple sections
+    - copying canonical values into deprecated locations so downstream modules
+      do not silently diverge by reading different keys
+
+    Canonicalization (Spec 12.14):
+    - dataloader knobs: `data.batch_size/num_workers/pin_memory` are canonical
+    - epochs: `trainer.num_epochs` is canonical; `task.epochs` is deprecated
+    - `model.in_channels` is treated as legacy (preferred: infer from metadata at runtime)
+    """
+    if not isinstance(config, (ConfigWrapper, SimpleNamespace)):
+        return config
+
+    data = getattr(config, "data", None)
+    task = getattr(config, "task", None)
+    trainer = getattr(config, "trainer", None)
+    model = getattr(config, "model", None)
+
+    # ---- Dataloader knobs: canonical under data.* ----
+    if data is not None and task is not None:
+        for key in ("batch_size", "num_workers", "pin_memory"):
+            if hasattr(data, key) and hasattr(task, key):
+                v_data = getattr(data, key)
+                v_task = getattr(task, key)
+                if v_data != v_task:
+                    _warn_duplicate_concept(
+                        f"[config] Duplicate concept detected: data.{key}={v_data} vs task.{key}={v_task}. "
+                        f"Using canonical data.{key}={v_data} and overriding task.{key} for compatibility."
+                    )
+                setattr(task, key, v_data)
+
+    # ---- Epochs: canonical under trainer.num_epochs ----
+    if trainer is not None:
+        if not hasattr(trainer, "num_epochs") and hasattr(trainer, "max_epochs"):
+            setattr(trainer, "num_epochs", getattr(trainer, "max_epochs"))
+
+    if trainer is not None and task is not None and hasattr(trainer, "num_epochs"):
+        tr_epochs = getattr(trainer, "num_epochs")
+        if hasattr(task, "epochs"):
+            tk_epochs = getattr(task, "epochs")
+            if tk_epochs != tr_epochs:
+                _warn_duplicate_concept(
+                    f"[config] Duplicate/ambiguous epochs detected: task.epochs={tk_epochs} vs "
+                    f"trainer.num_epochs={tr_epochs}. Using canonical trainer.num_epochs={tr_epochs} "
+                    f"and overriding task.epochs for compatibility."
+                )
+        setattr(task, "epochs", tr_epochs)
+
+    # ---- Legacy key notice: model.in_channels (TSPN family only) ----
+    if model is not None and hasattr(model, "in_channels"):
+        if getattr(model, "name", None) in {"TSPN", "TSPN_CL"}:
+            _warn_duplicate_concept(
+                f"[config] model.in_channels={getattr(model, 'in_channels')} is treated as legacy for TSPN/TSPN_CL; "
+                f"preferred behavior is to infer it from metadata at runtime."
+            )
+
+    return config
 
 # ==================== 配置保存和验证 ====================
 
