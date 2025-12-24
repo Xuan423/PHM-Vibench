@@ -182,7 +182,7 @@ class Default_task(pl.LightningModule):
         if extras is not None and getattr(self.args_model, 'use_contrastive_head', False):
             if hasattr(self.network, 'compute_contrastive_loss'):
                 total_epochs = getattr(self.args_trainer, "num_epochs", None)
-                contrastive_loss = self.network.compute_contrastive_loss(
+                contrastive_out = self.network.compute_contrastive_loss(
                     extras,
                     y,
                     getattr(self, "current_epoch", 0),
@@ -190,17 +190,31 @@ class Default_task(pl.LightningModule):
                 )
                 lambda_w = getattr(self.args_model, "lambda_contrastive", 0.0)
                 sparsity_pen = None
-                if isinstance(contrastive_loss, tuple):
-                    # (total, L_info, L_phys, sparsity_penalty, lambda_schedule)
-                    base_total = contrastive_loss[0]
-                    sparsity_pen = contrastive_loss[3] if len(contrastive_loss) > 3 else None
-                    lambda_w = contrastive_loss[4] if len(contrastive_loss) > 4 else lambda_w
+                proto_nce = None
+                complementarity_pen = None
+                if isinstance(contrastive_out, dict):
+                    base_total = contrastive_out.get("total", None)
+                    if base_total is None:
+                        raise ValueError("compute_contrastive_loss dict output must contain 'total'.")
+                    proto_nce = contrastive_out.get("proto_nce", None)
+                    sparsity_pen = contrastive_out.get("sparsity_penalty", None)
+                    complementarity_pen = contrastive_out.get("complementarity_penalty", None)
+                    lambda_w = float(contrastive_out.get("lambda_schedule", lambda_w))
+                elif isinstance(contrastive_out, tuple):
+                    # Legacy tuple: (total, L_info, L_phys, sparsity_penalty, lambda_schedule)
+                    base_total = contrastive_out[0]
+                    sparsity_pen = contrastive_out[3] if len(contrastive_out) > 3 else None
+                    lambda_w = contrastive_out[4] if len(contrastive_out) > 4 else lambda_w
                 else:
-                    base_total = contrastive_loss
+                    base_total = contrastive_out
                 weighted_contrastive = lambda_w * base_total
                 step_metrics[f"{stage}_contrastive_loss"] = weighted_contrastive
+                if proto_nce is not None:
+                    step_metrics[f"{stage}_proto_nce"] = proto_nce
                 if sparsity_pen is not None:
                     step_metrics[f"{stage}_sparsity_penalty"] = sparsity_pen
+                if complementarity_pen is not None:
+                    step_metrics[f"{stage}_complementarity_penalty"] = complementarity_pen
                 loss = loss + weighted_contrastive
 
         # 6. 计算总损失

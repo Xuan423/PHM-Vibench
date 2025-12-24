@@ -11,14 +11,15 @@ base_configs:
 
 environment:
   project: "demo_tspn_cl_dg"
-  seed: 42
+  seed: 17
+  iterations: 5
   output_dir: "results/demo/tspn_cl_dg"
   notes: "TSPN-CL concept head demo (DG)."
 
 task:
   target_system_id: [17]
-  source_domain_id: [0,1]
-  target_domain_id: [2]
+  source_domain_id: [1,2]
+  target_domain_id: [0]
 
 model:
   name: "TSPN_CL"
@@ -32,6 +33,14 @@ model:
   lambda_cl_start: 0.05 #0.05
   lambda_cl_end: 0.4 #0.4
   topk_ema_momentum: 0.8
+
+  # Multi-prototype ProtoNCE (minimal, hard-only)
+  num_prototypes_per_class: 4   # M=1 single-prototype baseline; set >1 for multi-prototype
+  proto_neg_k: 0                # K_neg: 0=all other-class prototypes, >0=top-K other-class prototypes
+  proto_ema_momentum: 0.8
+  complementarity_enabled: true
+  complementarity_weight: 0.01  # used only when enabled (prototype repulsion step size)
+  export_diagnostics: false     # set true to export diagnostics/prototypes_report.json
 
   # Stage 2 K-shot calibration (imprint on the same classifier head; optional metric tuning)
   stage2_enable: true

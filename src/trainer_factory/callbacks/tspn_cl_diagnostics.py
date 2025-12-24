@@ -7,11 +7,13 @@ overhead when diagnostics are disabled.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 import pytorch_lightning as pl
 import torch
+import torch.nn.functional as F
 
 
 class TSPNCLDiagnosticsCallback(pl.Callback):
@@ -29,6 +31,7 @@ class TSPNCLDiagnosticsCallback(pl.Callback):
         self.topk_csv = self.diagnostics_dir / "topk_report.csv"
         self.sparsity_csv = self.diagnostics_dir / "sparsity_report.csv"
         self.sparsity_md = self.diagnostics_dir / "sparsity_report.md"
+        self.prototypes_json = self.diagnostics_dir / "prototypes_report.json"
         self._prev_topk: Optional[set[int]] = None
 
     def _enabled(self, pl_module: pl.LightningModule) -> bool:
@@ -52,6 +55,19 @@ class TSPNCLDiagnosticsCallback(pl.Callback):
             "- `sparsity_coeff_col`: column-wise L2 penalty on `V` (shrinks per-feature contribution)\n",
             encoding="utf-8",
         )
+
+    def _append_json_record(self, path: Path, record: Dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data: list[Dict[str, Any]] = []
+        if path.exists():
+            try:
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(loaded, list):
+                    data = loaded
+            except Exception:
+                data = []
+        data.append(record)
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def on_train_epoch_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
         if not self._enabled(pl_module):
@@ -131,3 +147,56 @@ class TSPNCLDiagnosticsCallback(pl.Callback):
             )
             self._append_csv_row(self.sparsity_csv, header=header, row=row)
             self._write_sparsity_md_once()
+
+        # ---- PrototypeBank report (multi-prototype ProtoNCE) ----
+        proto_map = getattr(network, "_proto_head_key_to_bufkey", None)
+        if not isinstance(proto_map, dict) or not proto_map:
+            return
+
+        heads_report: Dict[str, Any] = {}
+        for head_key, bufkey in proto_map.items():
+            P = getattr(network, f"_proto_P_{bufkey}", None)
+            counts = getattr(network, f"_proto_epoch_counts_{bufkey}", None)
+            if P is None or counts is None:
+                continue
+
+            P_cpu = P.detach().float().cpu()  # [C, M, d]
+            counts_cpu = counts.detach().cpu().long()  # [C, M]
+            C, M, _ = P_cpu.shape
+
+            # Occupancy health
+            sum_counts = counts_cpu.sum(dim=1)  # [C]
+            max_counts = counts_cpu.max(dim=1).values  # [C]
+            sum_f = sum_counts.float()
+            max_ratio = torch.where(sum_counts > 0, max_counts.float() / sum_f, torch.zeros_like(sum_f))
+
+            denom = sum_f.clamp_min(1.0).unsqueeze(1)
+            p = counts_cpu.float() / denom
+            entropy = -(p * torch.log(p.clamp_min(1e-12))).sum(dim=1)
+            n_eff = torch.exp(entropy)
+            n_eff = torch.where(sum_counts > 0, n_eff, torch.zeros_like(n_eff))
+
+            # Pairwise cosine similarities per class
+            if M > 1:
+                P_norm = F.normalize(P_cpu, p=2, dim=-1)
+                pairwise = torch.matmul(P_norm, P_norm.transpose(-1, -2)).clamp(-1.0, 1.0)  # [C,M,M]
+                off = pairwise.clone()
+                diag = torch.arange(M)
+                off[:, diag, diag] = float("-inf")
+                max_offdiag = off.view(C, -1).max(dim=1).values
+                max_offdiag = torch.where(torch.isfinite(max_offdiag), max_offdiag, torch.zeros_like(max_offdiag))
+            else:
+                pairwise = torch.ones(C, 1, 1)
+                max_offdiag = torch.zeros(C)
+
+            heads_report[str(head_key)] = {
+                "num_classes": int(C),
+                "M": int(M),
+                "max_assignment_ratio": [float(x) for x in max_ratio.tolist()],
+                "n_eff": [float(x) for x in n_eff.tolist()],
+                "max_offdiag_cos": [float(x) for x in max_offdiag.tolist()],
+                "pairwise_cos": pairwise.tolist(),
+            }
+
+        if heads_report:
+            self._append_json_record(self.prototypes_json, {"epoch": epoch, "heads": heads_report})
