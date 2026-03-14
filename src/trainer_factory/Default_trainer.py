@@ -3,6 +3,7 @@ from pytorch_lightning.loggers import WandbLogger, CSVLogger
 from pytorch_lightning.callbacks import ModelCheckpoint, ModelPruning, EarlyStopping
 from torch.utils.tensorboard.writer import SummaryWriter
 import os
+import torch
 import swanlab
 from swanlab.integration.pytorch_lightning import SwanLabLogger
 from src.trainer_factory import register_trainer
@@ -56,8 +57,8 @@ def trainer(args_e,args_t, args_d, path):
             )
         log_list.append(swanlab_logger)
             
-    # 设置设备类型：CPU 或自动选择
-    accelerate_type = 'cpu' if args_t.device == 'cpu' else 'auto'
+    # 设置设备类型：优先尝试用户请求的 CUDA；若当前环境无法完成真正的 CUDA 初始化，则回退到 CPU。
+    accelerate_type, devices = resolve_accelerator(args_t)
 
     # 如果不存在log_every_n_steps，使用默认值50 # TODO @liq22
     if not getattr(args_t, 'log_every_n_steps', None):
@@ -68,12 +69,42 @@ def trainer(args_e,args_t, args_d, path):
         callbacks=callback_list,
         accelerator=accelerate_type,
         max_epochs=args_t.num_epochs,
-        devices=args_t.gpus,
+        devices=devices,
         logger=log_list,
         log_every_n_steps=args_t.log_every_n_steps,
-        strategy="ddp_find_unused_parameters_true" if args_t.gpus > 1 else 'auto',
+        strategy="ddp_find_unused_parameters_true" if devices > 1 else 'auto',
     )
     return trainer
+
+
+def resolve_accelerator(args):
+    requested_device = getattr(args, "device", "cpu")
+    requested_gpus = int(getattr(args, "gpus", getattr(args, "devices", 1)))
+    if requested_device == "cpu" or requested_gpus <= 0:
+        return "cpu", 1
+
+    try:
+        if not torch.cuda.is_available():
+            raise RuntimeError("torch.cuda.is_available() returned False")
+        _ = torch.cuda.device_count()
+        torch.empty(1, device="cuda")
+        return "auto", requested_gpus
+    except Exception as exc:  # pragma: no cover - runtime safeguard
+        print(f"[WARN] CUDA initialization failed, falling back to CPU: {exc}")
+        setattr(args, "device", "cpu")
+        setattr(args, "gpus", 1)
+        hard_disable_cuda()
+        return "cpu", 1
+
+
+def hard_disable_cuda():
+    """Prevent later framework code from re-triggering broken CUDA probes."""
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+
+    torch.cuda.is_available = lambda: False
+    torch.cuda.device_count = lambda: 0
+    torch.cuda.current_device = lambda: 0
+    torch.cuda.get_rng_state_all = lambda: []
 
 def call_backs(args, path):
     """
@@ -104,6 +135,15 @@ def call_backs(args, path):
         callback_list.append(TSPNCLDiagnosticsCallback(output_dir=path))
     except Exception as e:  # pragma: no cover - best-effort optional callback
         print(f"[WARN] Failed to attach TSPNCLDiagnosticsCallback: {e}")
+
+    try:
+        from src.trainer_factory.callbacks.interpretable_tf_diagnostics import (
+            InterpretableTFDiagnosticsCallback,
+        )
+
+        callback_list.append(InterpretableTFDiagnosticsCallback(output_dir=path))
+    except Exception as e:  # pragma: no cover - best-effort optional callback
+        print(f"[WARN] Failed to attach InterpretableTFDiagnosticsCallback: {e}")
 
     # 模型修剪回调（根据需求添加）
     if getattr(args, "pruning", 0.0):

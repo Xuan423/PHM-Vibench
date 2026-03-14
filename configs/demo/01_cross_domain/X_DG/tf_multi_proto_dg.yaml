@@ -1,0 +1,52 @@
+# Interpretable time-frequency multi-prototype DG demo
+
+pipeline: "Pipeline_01_default"
+
+base_configs:
+  environment: "configs/base/environment/base.yaml"
+  data: "configs/base/data/base_cross_domain.yaml"
+  task: "configs/base/task/dg.yaml"
+  trainer: "configs/base/trainer/default_single_gpu.yaml"
+
+environment:
+  project: "demo_tf_multi_proto_dg"
+  seed: 44
+  iterations: 1
+  output_dir: "results/demo/tf_multi_proto_dg"
+  notes: "Interpretable time-frequency multi-prototype DG demo."
+
+data:
+  num_workers: 4
+
+task:
+  target_system_id: [17]
+  source_domain_id: [1,2]
+  target_domain_id: [0]
+
+model:
+  name: "TF_MultiProtoDG"
+  type: "X_model"
+  device: "cuda"
+  input_length: 4096
+  time_operators: ["Identity", "FirstDifference", "DetrendMovingAverage", "HilbertEnvelope", "TKEO"]
+  freq_operators: ["IdentitySpectrum", "LogSpectrum", "SpectralWhitening", "GaussianBandMask"]
+  time_indicators: ["Mean", "Std", "RMS", "Kurtosis", "CrestFactor", "Entropy"]
+  freq_indicators: ["BandEnergy", "BandRMS", "SpectralEntropy", "PeakRatio"]
+  time_patch_count: 8
+  freq_band_count: 8
+  padding_mode: "zero_right"
+  use_topk_selector: false
+  concept_dim: 64
+  use_contrastive_head: true
+  num_prototypes_per_class: 4
+  proto_neg_k: 0
+  proto_ema_momentum: 0.95
+  proto_empty_reset_steps: 200
+  readability_weight: 0.005
+  complementarity_weight: 0.01
+  lambda_cl_start: 0.05
+  lambda_cl_end: 0.3
+  temperature: 0.2
+  export_diagnostics: false
+  prototype_card_top_t: 8
+  diagnostics_max_members: 32

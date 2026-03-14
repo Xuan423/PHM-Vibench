@@ -17,6 +17,6 @@ environment:
 
 task:
   # 仍需指定 target_system_id 以兼容当前 data_factory 的 search_dataset_id 逻辑
-  target_system_id: [19]
-  source_domain_id: [0, 1, 2, 3]
-  target_domain_id: [10]
+  target_system_id: [16]
+  source_domain_id: [1,4,5,8]
+  target_domain_id: [2,3,6,7]

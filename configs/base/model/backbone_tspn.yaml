@@ -4,15 +4,16 @@ model:
   device: "cuda"
 
   signal_processing_configs:
-    layer1: ['LNO','WF','HT','I']
-    layer2: ['LNO','WF','HT','I']
-    layer3: ['LNO','WF','HT','I']
-    layer4: ['LNO','WF','HT','I']
-  feature_extractor_configs: ['Mean', 'Std', 'Var', 'Entropy','Max', 'Min', 'AbsMean', 'Kurtosis', 'RMS', 'CrestFactor','Skewness', 'ClearanceFactor', 'ShapeFactor']
+    layer1: ['WF','HT','I']
+    layer2: ['WF','HT','I']
+    layer3: ['WF','HT','I']
+    layer4: ['WF','HT','I']
+  # feature_extractor_configs: ['Mean', 'Std', 'Var', 'Entropy','Max', 'Min', 'AbsMean', 'Kurtosis', 'RMS', 'CrestFactor','Skewness', 'ClearanceFactor', 'ShapeFactor']
+  feature_extractor_configs: ['Entropy']
   skip_connection: true
   in_dim: 4096
   out_dim: 4096
-  out_channels: 4
+  out_channels: 3
   scale: 4
   f_c_mu: 0.0
   f_c_sigma: 0.1

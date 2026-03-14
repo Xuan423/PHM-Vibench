@@ -15,7 +15,7 @@ def main():
     parser.add_argument(
         "--config",
         type=str,
-        default='configs/demo/01_cross_domain/X_DG/tspn_cl.yaml',
+        default='configs/demo/01_cross_domain/X_DG/tf_multi_proto_dg.yaml',
         help="配置文件路径或预设名称（推荐使用）",
     )
 

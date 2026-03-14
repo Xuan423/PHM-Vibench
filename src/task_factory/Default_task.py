@@ -50,12 +50,8 @@ class Default_task(pl.LightningModule):
             gpus = getattr(args_trainer, "devices", 1)
             setattr(args_trainer, "gpus", gpus)
 
-        # 将网络移动到 GPU（仅在 CUDA 可用且配置要求使用 GPU 时）
-        use_cuda = bool(gpus) and torch.cuda.is_available()
-        if use_cuda and hasattr(network, "cuda"):
-            self.network = network.cuda()
-        else:
-            self.network = network  # 在当前环境（无 GPU）下保持 CPU 训练
+        # 设备放置交给 PyTorch Lightning 统一管理，避免在 task 初始化阶段触发额外的 CUDA 状态错误。
+        self.network = network
         self.args_task = args_task
         self.args_model = args_model
         self.args_data = args_data
@@ -196,10 +192,17 @@ class Default_task(pl.LightningModule):
                     base_total = contrastive_out.get("total", None)
                     if base_total is None:
                         raise ValueError("compute_contrastive_loss dict output must contain 'total'.")
-                    proto_nce = contrastive_out.get("proto_nce", None)
-                    sparsity_pen = contrastive_out.get("sparsity_penalty", None)
-                    complementarity_pen = contrastive_out.get("complementarity_penalty", None)
                     lambda_w = float(contrastive_out.get("lambda_schedule", lambda_w))
+                    for extra_key, extra_value in contrastive_out.items():
+                        if extra_key in {"total", "lambda_schedule"}:
+                            continue
+                        if torch.is_tensor(extra_value):
+                            if extra_value.ndim == 0:
+                                step_metrics[f"{stage}_{extra_key}"] = extra_value
+                        elif isinstance(extra_value, (float, int)):
+                            step_metrics[f"{stage}_{extra_key}"] = torch.tensor(
+                                float(extra_value), device=loss.device
+                            )
                 elif isinstance(contrastive_out, tuple):
                     # Legacy tuple: (total, L_info, L_phys, sparsity_penalty, lambda_schedule)
                     base_total = contrastive_out[0]
@@ -209,13 +212,21 @@ class Default_task(pl.LightningModule):
                     base_total = contrastive_out
                 weighted_contrastive = lambda_w * base_total
                 step_metrics[f"{stage}_contrastive_loss"] = weighted_contrastive
-                if proto_nce is not None:
-                    step_metrics[f"{stage}_proto_nce"] = proto_nce
                 if sparsity_pen is not None:
                     step_metrics[f"{stage}_sparsity_penalty"] = sparsity_pen
                 if complementarity_pen is not None:
                     step_metrics[f"{stage}_complementarity_penalty"] = complementarity_pen
                 loss = loss + weighted_contrastive
+
+        if extras is not None and hasattr(self.network, "update_diagnostics"):
+            try:
+                self.network.update_diagnostics(batch, extras, stage)
+            except Exception as exc:
+                if not hasattr(self, "_warned_diagnostics_failure"):
+                    self._warned_diagnostics_failure = set()
+                if stage not in self._warned_diagnostics_failure:
+                    print(f"[WARN] diagnostics update failed during {stage}: {exc}")
+                    self._warned_diagnostics_failure.add(stage)
 
         # 6. 计算总损失
         total_loss = loss + reg_dict.get('total', torch.tensor(0.0, device=loss.device))
