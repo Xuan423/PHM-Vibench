@@ -5,6 +5,7 @@ from typing import Any, Dict, Optional
 import torch
 import torch.nn as nn
 
+from .ablation_masks import build_feature_mask, describe_active_components
 from .config_schema import TFMultiProtoDGConfig, build_model_config
 from .diagnostics_state import DiagnosticsState
 from .feature_encoder import FeatureEncoder
@@ -50,6 +51,9 @@ class Model(nn.Module):
             raise ValueError(
                 f"model.top_k_features={self.config.top_k_features} exceeds feature_dim={self.feature_dim}."
             )
+        feature_mask = build_feature_mask(self.feature_meta, self.config.ablation)
+        self.register_buffer("feature_mask", feature_mask, persistent=False)
+        self.active_component_summary = describe_active_components(self.feature_meta, feature_mask)
 
         self.encoder = FeatureEncoder(
             feature_dim=self.feature_dim,
@@ -70,7 +74,7 @@ class Model(nn.Module):
             neg_k=self.config.proto_neg_k,
             empty_reset_steps=self.config.proto_empty_reset_steps,
         )
-        self.export_diagnostics = self.config.export_diagnostics
+        self.export_diagnostics = self.config.diagnostics_enabled
         self.diagnostics_state = DiagnosticsState(
             feature_meta=self.feature_meta,
             top_t=self.config.prototype_card_top_t,
@@ -80,6 +84,33 @@ class Model(nn.Module):
     @property
     def metric(self) -> nn.Linear:
         return self.encoder.metric
+
+    def _feature_mask_on(self, device: torch.device) -> torch.Tensor:
+        return self.feature_mask.to(device=device)
+
+    def _apply_structural_mask(self, h_raw: torch.Tensor) -> torch.Tensor:
+        return h_raw * self._feature_mask_on(h_raw.device)
+
+    def _masked_metric_weight(self) -> torch.Tensor:
+        return self.metric.weight * self._feature_mask_on(self.metric.weight.device).unsqueeze(0)
+
+    @staticmethod
+    def _zero_contrastive_dict(reference: torch.Tensor, assignment_ratio: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+        zero = reference.new_zeros(())
+        return {
+            "total": zero,
+            "lambda_schedule": zero,
+            "proto_nce": zero,
+            "readability_penalty": zero,
+            "complementarity_penalty": zero,
+            "assignment_ratio": assignment_ratio if assignment_ratio is not None else zero,
+        }
+
+    def _assignment_ratio(self, assignments: Optional[torch.Tensor], reference: torch.Tensor) -> torch.Tensor:
+        if assignments is None:
+            return reference.new_zeros(())
+        bincount = torch.bincount(assignments.detach().view(-1), minlength=self.config.num_prototypes_per_class).float()
+        return (bincount.max() / bincount.sum().clamp_min(1.0)).to(reference.device)
 
     def _extract_interpretable_features(self, x: torch.Tensor) -> torch.Tensor:
         x_bcl = to_bcl(x)
@@ -92,7 +123,8 @@ class Model(nn.Module):
         return flatten_feature_tensors(time_features, freq_features)
 
     def forward_with_batch(self, batch: Dict[str, Any], epoch: int = 0) -> Dict[str, Any]:
-        h_raw = self._extract_interpretable_features(batch["x"])
+        h_raw_full = self._extract_interpretable_features(batch["x"])
+        h_raw = self._apply_structural_mask(h_raw_full)
         labels = batch.get("y")
         labels_tensor = labels.to(h_raw.device).long() if torch.is_tensor(labels) else None
         extras = self.encoder.encode(
@@ -102,8 +134,12 @@ class Model(nn.Module):
             epoch=epoch,
         )
         extras["labels"] = labels_tensor
+        extras["h_raw_full"] = h_raw_full
+        extras["h_raw_struct_masked"] = h_raw
+        extras["variant_id"] = self.config.variant_id
+        extras["active_components"] = self.active_component_summary
 
-        if labels_tensor is not None and self.config.use_contrastive_head:
+        if labels_tensor is not None and self.config.use_contrastive_head and self.config.prototype_assignment_enabled:
             assignments = self.prototype_bank.assign(extras["c"], labels_tensor, str(extras["head_key"]))
             extras["prototype_assignments"] = assignments["assignments"]
             extras["prototype_pos_scores"] = assignments["pos_scores"]
@@ -113,8 +149,9 @@ class Model(nn.Module):
         return extras
 
     def forward(self, x: torch.Tensor, file_id=None, task_id=None) -> torch.Tensor:
+        h_raw_full = self._extract_interpretable_features(x)
         extras = self.encoder.encode(
-            h_raw=self._extract_interpretable_features(x),
+            h_raw=self._apply_structural_mask(h_raw_full),
             file_ids_raw=file_id,
             labels=None,
             epoch=0,
@@ -128,9 +165,10 @@ class Model(nn.Module):
         epoch: Optional[int] = None,
         total_epochs: Optional[int] = None,
     ) -> Dict[str, torch.Tensor]:
-        if not self.config.use_contrastive_head or extras.get("prototype_assignments") is None:
-            zero = extras["c"].new_zeros(())
-            return {"total": zero, "lambda_schedule": zero, "proto_nce": zero}
+        assignments = extras.get("prototype_assignments")
+        assignment_ratio = self._assignment_ratio(assignments, extras["c"])
+        if not self.config.use_contrastive_head or assignments is None:
+            return self._zero_contrastive_dict(extras["c"], assignment_ratio=assignment_ratio)
 
         if total_epochs is None or total_epochs <= 1:
             ratio = 1.0
@@ -139,22 +177,31 @@ class Model(nn.Module):
         lambda_schedule = self.config.lambda_cl_start + (
             self.config.lambda_cl_end - self.config.lambda_cl_start
         ) * ratio
+        lambda_schedule *= self.config.contrastive_scale
+
+        labels_device = labels.to(extras["c"].device).long()
+        head_key = str(extras["head_key"])
+        if self.config.prototype_update_enabled:
+            self.prototype_bank.update(
+                c=extras["c"].detach(),
+                labels=labels_device,
+                assignments=assignments.detach(),
+                head_key=head_key,
+            )
+        if lambda_schedule <= 0.0:
+            losses = self._zero_contrastive_dict(extras["c"], assignment_ratio=assignment_ratio)
+            losses["lambda_schedule"] = extras["c"].new_tensor(lambda_schedule)
+            return losses
 
         losses = self.prototype_bank.compute_losses(
             c=extras["c"],
-            labels=labels.to(extras["c"].device).long(),
-            assignments=extras["prototype_assignments"],
-            head_key=str(extras["head_key"]),
-            metric_weight=self.metric.weight,
+            labels=labels_device,
+            assignments=assignments,
+            head_key=head_key,
+            metric_weight=self._masked_metric_weight(),
             temperature=self.config.temperature,
-            readability_weight=self.config.readability_weight,
-            complementarity_weight=self.config.complementarity_weight,
-        )
-        self.prototype_bank.update(
-            c=extras["c"].detach(),
-            labels=labels.to(extras["c"].device).long(),
-            assignments=extras["prototype_assignments"].detach(),
-            head_key=str(extras["head_key"]),
+            readability_weight=self.config.readability_weight * self.config.ablation.loss_control.readability_scale,
+            complementarity_weight=self.config.complementarity_weight * self.config.ablation.loss_control.complementarity_scale,
         )
         losses["lambda_schedule"] = extras["c"].new_tensor(lambda_schedule)
         return losses
@@ -170,7 +217,14 @@ class Model(nn.Module):
     def export_diagnostics_payload(self, stage: str, epoch: int) -> Dict[str, object]:
         if not self.export_diagnostics:
             return {}
-        payload = self.diagnostics_state.build_stage_payload(stage, self.prototype_bank, self.metric.weight.detach())
+        payload = self.diagnostics_state.build_stage_payload(
+            stage=stage,
+            prototype_bank=self.prototype_bank if self.config.prototype_assignment_enabled else None,
+            metric_weight=self._masked_metric_weight().detach(),
+            feature_mask=self.feature_mask.detach(),
+            variant_id=self.config.variant_id,
+            active_components=self.active_component_summary,
+        )
         payload["epoch"] = int(epoch)
         payload["stage"] = stage
         return payload

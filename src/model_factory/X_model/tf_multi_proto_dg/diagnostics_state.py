@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 
@@ -63,9 +63,46 @@ class DiagnosticsState:
     def build_feature_map(self) -> List[dict]:
         return [item.to_dict() for item in self.feature_meta]
 
-    def build_stage_payload(self, stage: str, prototype_bank, metric_weight: torch.Tensor) -> Dict[str, object]:
+    def _active_feature_indices(self, feature_mask: Optional[torch.Tensor]) -> List[int]:
+        if feature_mask is None:
+            return list(range(len(self.feature_meta)))
+        return [
+            int(index)
+            for index, value in enumerate(feature_mask.detach().cpu().view(-1).tolist())
+            if float(value) > 0.0
+        ]
+
+    def _masked_signature(self, signature: torch.Tensor, active_indices: List[int]) -> torch.Tensor:
+        if not active_indices:
+            return torch.zeros_like(signature)
+        masked = torch.zeros_like(signature)
+        active_tensor = torch.as_tensor(active_indices, device=signature.device, dtype=torch.long)
+        masked[active_tensor] = signature[active_tensor]
+        return masked
+
+    def build_stage_payload(
+        self,
+        stage: str,
+        prototype_bank,
+        metric_weight: torch.Tensor,
+        feature_mask: Optional[torch.Tensor] = None,
+        variant_id: str = "baseline",
+        active_components: Optional[Dict[str, object]] = None,
+    ) -> Dict[str, object]:
         store = self._stage_store.get(stage, {})
         feature_map = self.build_feature_map()
+        active_feature_indices = self._active_feature_indices(feature_mask)
+        payload: Dict[str, object] = {
+            "feature_map": feature_map,
+            "variant_id": str(variant_id),
+            "active_components": active_components or {},
+            "active_feature_count": int(len(active_feature_indices)),
+        }
+        if prototype_bank is None:
+            payload["prototype_health"] = None
+            payload["prototype_cards"] = None
+            return payload
+
         health = prototype_bank.export_all_health()
         prototype_cards: List[dict] = []
         for head_key in prototype_bank.head_keys:
@@ -76,11 +113,12 @@ class DiagnosticsState:
             for class_id in range(num_classes):
                 class_signatures = signatures[class_id]
                 for proto_id in range(num_protos):
-                    signature = class_signatures[proto_id]
-                    top_indices = torch.topk(
-                        signature,
-                        k=min(self.top_t, signature.numel()),
-                    ).indices.tolist()
+                    signature = self._masked_signature(class_signatures[proto_id], active_feature_indices)
+                    top_k = min(self.top_t, len(active_feature_indices))
+                    if top_k > 0:
+                        top_indices = torch.topk(signature, k=top_k).indices.tolist()
+                    else:
+                        top_indices = []
                     signature_sum = signature.sum().item()
                     if signature_sum > 0:
                         probs = signature / signature_sum
@@ -129,8 +167,6 @@ class DiagnosticsState:
                             },
                         }
                     )
-        return {
-            "feature_map": feature_map,
-            "prototype_health": health,
-            "prototype_cards": prototype_cards,
-        }
+        payload["prototype_health"] = health
+        payload["prototype_cards"] = prototype_cards
+        return payload

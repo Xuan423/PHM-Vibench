@@ -17,6 +17,7 @@ class InterpretableTFDiagnosticsCallback(pl.Callback):
         self.feature_map_json = self.diagnostics_dir / "feature_map.json"
         self.prototype_cards_json = self.diagnostics_dir / "prototype_cards.json"
         self.prototype_health_json = self.diagnostics_dir / "prototype_health.json"
+        self.context_json = self.diagnostics_dir / "diagnostics_context.json"
 
     def _enabled(self, pl_module: pl.LightningModule) -> bool:
         network = getattr(pl_module, "network", None)
@@ -51,6 +52,20 @@ class InterpretableTFDiagnosticsCallback(pl.Callback):
             encoding="utf-8",
         )
 
+    def _write_context_once(self, payload: Dict[str, Any]) -> None:
+        if self.context_json.exists():
+            return
+        context = {
+            "variant_id": payload.get("variant_id", "baseline"),
+            "active_components": payload.get("active_components", {}),
+            "active_feature_count": payload.get("active_feature_count"),
+        }
+        self.context_json.parent.mkdir(parents=True, exist_ok=True)
+        self.context_json.write_text(
+            json.dumps(context, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
     def _export_stage(self, trainer: pl.Trainer, pl_module: pl.LightningModule, stage: str) -> None:
         if not self._enabled(pl_module):
             return
@@ -58,9 +73,16 @@ class InterpretableTFDiagnosticsCallback(pl.Callback):
         if not payload:
             return
         self._write_feature_map_once(payload)
+        self._write_context_once(payload)
         cards = payload.get("prototype_cards")
         health = payload.get("prototype_health")
-        record = {"epoch": payload.get("epoch"), "stage": payload.get("stage")}
+        record = {
+            "epoch": payload.get("epoch"),
+            "stage": payload.get("stage"),
+            "variant_id": payload.get("variant_id", "baseline"),
+            "active_components": payload.get("active_components", {}),
+            "active_feature_count": payload.get("active_feature_count"),
+        }
         if cards is not None:
             self._append_json(self.prototype_cards_json, {**record, "items": cards})
         if health is not None:
