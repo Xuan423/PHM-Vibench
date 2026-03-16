@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Sequence
+from typing import Any, Dict, List, Mapping, Sequence
 
 import pandas as pd
 
@@ -97,23 +97,31 @@ def extract_diagnostics_summary(run_dir: str | Path) -> Dict[str, Any]:
     return summary
 
 
-def collect_variant_results(
-    variant_spec: Mapping[str, Any],
+def collect_study_results(
+    item_spec: Mapping[str, Any],
     iteration_records: Sequence[Mapping[str, Any]],
     run_dirs: Sequence[str | Path],
     smoke: bool = False,
     num_epochs: int | None = None,
+    task_spec: Mapping[str, Any] | None = None,
+    study_type: str = "ablation",
 ) -> pd.DataFrame:
     rows: List[Dict[str, Any]] = []
+    task_spec = task_spec or {}
+    item_id = str(item_spec.get("item_id", item_spec.get("variant_id", "")))
     for iteration, record in enumerate(iteration_records):
         row: Dict[str, Any] = {
-            "variant_id": variant_spec["variant_id"],
-            "group": variant_spec.get("group", ""),
-            "description": variant_spec.get("description", ""),
+            "study_type": study_type,
+            "task_id": task_spec.get("task_id", ""),
+            "task_description": task_spec.get("description", ""),
+            "item_id": item_id,
+            "variant_id": item_id,
+            "group": item_spec.get("group", ""),
+            "description": item_spec.get("description", ""),
             "iteration": int(iteration),
             "smoke": bool(smoke),
             "num_epochs": num_epochs,
-            "diagnostics_expected": bool(variant_spec.get("diagnostics_expected", False)),
+            "diagnostics_expected": bool(item_spec.get("diagnostics_expected", False)),
             "success": bool(record.get("success", True)),
             "error_message": record.get("error_message"),
         }
@@ -127,7 +135,9 @@ def collect_variant_results(
         for key, value in record.items():
             if key in {"success", "error_message"}:
                 continue
-            if isinstance(value, (int, float, bool)) and not isinstance(value, bool):
+            if isinstance(value, bool):
+                row[str(key)] = value
+            elif isinstance(value, (int, float)):
                 row[str(key)] = float(value)
             else:
                 row[str(key)] = value
@@ -135,11 +145,22 @@ def collect_variant_results(
     return pd.DataFrame(rows)
 
 
-def aggregate_variant_results(df: pd.DataFrame) -> pd.DataFrame:
+def aggregate_study_results(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
 
-    group_cols = ["variant_id", "group", "description", "smoke", "num_epochs", "diagnostics_expected"]
+    group_cols = [
+        "study_type",
+        "task_id",
+        "task_description",
+        "item_id",
+        "variant_id",
+        "group",
+        "description",
+        "smoke",
+        "num_epochs",
+        "diagnostics_expected",
+    ]
     numeric_cols = [
         column
         for column in df.columns
@@ -162,12 +183,18 @@ def aggregate_variant_results(df: pd.DataFrame) -> pd.DataFrame:
 
         for column in numeric_cols:
             series = pd.to_numeric(group_df[column], errors="coerce")
-            row[f"{column}_mean"] = float(series.mean()) if not series.isna().all() else float("nan")
-            row[f"{column}_std"] = float(series.std(ddof=0)) if not series.isna().all() else float("nan")
-            row[f"{column}_min"] = float(series.min()) if not series.isna().all() else float("nan")
-            row[f"{column}_max"] = float(series.max()) if not series.isna().all() else float("nan")
+            if series.isna().all():
+                row[f"{column}_mean"] = float("nan")
+                row[f"{column}_std"] = float("nan")
+                row[f"{column}_min"] = float("nan")
+                row[f"{column}_max"] = float("nan")
+            else:
+                row[f"{column}_mean"] = float(series.mean())
+                row[f"{column}_std"] = float(series.std(ddof=0))
+                row[f"{column}_min"] = float(series.min())
+                row[f"{column}_max"] = float(series.max())
         rows.append(row)
-    return pd.DataFrame(rows).sort_values(["group", "variant_id"]).reset_index(drop=True)
+    return pd.DataFrame(rows).sort_values(["task_id", "group", "item_id"]).reset_index(drop=True)
 
 
 def _format_markdown_cell(value: Any) -> str:
@@ -193,44 +220,62 @@ def _df_to_markdown(df: pd.DataFrame) -> str:
     return "\n".join(lines)
 
 
-def render_markdown_summary(
+def render_study_markdown_summary(
     runs_df: pd.DataFrame,
     summary_df: pd.DataFrame,
-    variant_manifest: Sequence[Mapping[str, Any]],
+    item_manifest: Sequence[Mapping[str, Any]],
     study_name: str,
+    study_type: str,
+    task_manifest: Sequence[Mapping[str, Any]] | None = None,
 ) -> str:
-    variant_table = pd.DataFrame(
+    item_table = pd.DataFrame(
         [
             {
-                "variant_id": item.get("variant_id"),
+                "item_id": item.get("item_id", item.get("variant_id")),
                 "group": item.get("group"),
                 "description": item.get("description"),
                 "diagnostics_expected": item.get("diagnostics_expected"),
             }
-            for item in variant_manifest
+            for item in item_manifest
         ]
     )
+    task_table = pd.DataFrame(task_manifest or [])
 
     summary_metric_cols = [
         column
         for column in summary_df.columns
-        if column in {"variant_id", "group", "num_iterations", "num_success", "num_failed", "notes"}
+        if column
+        in {
+            "study_type",
+            "task_id",
+            "item_id",
+            "group",
+            "num_iterations",
+            "num_success",
+            "num_failed",
+            "notes",
+        }
         or column.endswith("_mean")
     ]
     diag_cols = [
         column
         for column in summary_df.columns
-        if column in {"variant_id", "group", "notes"}
+        if column in {"task_id", "item_id", "group", "notes"}
         or column.startswith("diag_")
         and column.endswith("_mean")
     ]
-
     sections = [
         f"# {study_name}",
         "",
-        "## Variant Definitions",
+        f"Study type: `{study_type}`",
         "",
-        _df_to_markdown(variant_table),
+        "## Task Definitions",
+        "",
+        _df_to_markdown(task_table),
+        "",
+        "## Study Items",
+        "",
+        _df_to_markdown(item_table),
         "",
         "## Run-Level Records",
         "",
@@ -247,6 +292,73 @@ def render_markdown_summary(
     return "\n".join(sections).strip() + "\n"
 
 
+def write_study_summary_bundle(
+    output_dir: str | Path,
+    runs_df: pd.DataFrame,
+    summary_df: pd.DataFrame,
+    markdown: str,
+    item_manifest: Sequence[Mapping[str, Any]],
+    task_manifest: Sequence[Mapping[str, Any]] | None = None,
+    artifact_prefix: str = "study",
+) -> None:
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    (runs_df if not runs_df.empty else pd.DataFrame()).to_csv(output_path / f"{artifact_prefix}_runs.csv", index=False)
+    (summary_df if not summary_df.empty else pd.DataFrame()).to_csv(
+        output_path / f"{artifact_prefix}_summary.csv", index=False
+    )
+    (output_path / f"{artifact_prefix}_summary.md").write_text(markdown, encoding="utf-8")
+    (output_path / f"{artifact_prefix}_manifest.json").write_text(
+        json.dumps(
+            {
+                "items": list(item_manifest),
+                "tasks": list(task_manifest or []),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
+def collect_variant_results(
+    variant_spec: Mapping[str, Any],
+    iteration_records: Sequence[Mapping[str, Any]],
+    run_dirs: Sequence[str | Path],
+    smoke: bool = False,
+    num_epochs: int | None = None,
+) -> pd.DataFrame:
+    return collect_study_results(
+        item_spec={**variant_spec, "item_id": variant_spec.get("variant_id")},
+        iteration_records=iteration_records,
+        run_dirs=run_dirs,
+        smoke=smoke,
+        num_epochs=num_epochs,
+        study_type="ablation",
+    )
+
+
+def aggregate_variant_results(df: pd.DataFrame) -> pd.DataFrame:
+    return aggregate_study_results(df)
+
+
+def render_markdown_summary(
+    runs_df: pd.DataFrame,
+    summary_df: pd.DataFrame,
+    variant_manifest: Sequence[Mapping[str, Any]],
+    study_name: str,
+) -> str:
+    return render_study_markdown_summary(
+        runs_df=runs_df,
+        summary_df=summary_df,
+        item_manifest=[{**item, "item_id": item.get("variant_id")} for item in variant_manifest],
+        study_name=study_name,
+        study_type="ablation",
+        task_manifest=[],
+    )
+
+
 def write_summary_bundle(
     output_dir: str | Path,
     runs_df: pd.DataFrame,
@@ -256,11 +368,15 @@ def write_summary_bundle(
 ) -> None:
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-
-    runs_df.to_csv(output_path / "ablation_runs.csv", index=False)
-    summary_df.to_csv(output_path / "ablation_summary.csv", index=False)
-    (output_path / "ablation_summary.md").write_text(markdown, encoding="utf-8")
-    (output_path / "variant_manifest.json").write_text(
-        json.dumps(list(variant_manifest), ensure_ascii=False, indent=2),
-        encoding="utf-8",
+    write_study_summary_bundle(
+        output_dir=output_path,
+        runs_df=runs_df,
+        summary_df=summary_df,
+        markdown=markdown,
+        item_manifest=[{**item, "item_id": item.get("variant_id")} for item in variant_manifest],
+        task_manifest=[],
+        artifact_prefix="ablation",
     )
+    generated_manifest = output_path / "ablation_manifest.json"
+    if generated_manifest.exists():
+        generated_manifest.rename(output_path / "variant_manifest.json")

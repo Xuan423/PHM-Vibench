@@ -1,0 +1,24 @@
+study:
+  type: "hparam"
+  name: "tf_multi_proto_dg_batch_hparam_core"
+  base_config: "configs/demo/01_cross_domain/X_DG/tf_multi_proto_dg.yaml"
+  output_dir: "results/experiments/tf_multi_proto_dg_batch/hparam"
+  summary:
+    export_markdown: true
+    export_csv: true
+
+execution:
+  iterations: 5
+  default_num_epochs: 100
+  smoke_iterations: 1
+  smoke_num_epochs: 1
+  smoke_num_workers: 0
+  diagnostics_extract: true
+  continue_on_error: true
+
+grid:
+  model.lambda_cl_start: [0.0, 0.02, 0.05]
+  model.lambda_cl_end: [0.1, 0.2, 0.3]
+  model.temperature: [0.2, 0.3, 0.5]
+  task.lr: [0.001, 0.0005]
+  task.weight_decay: [0.0, 0.0001, 0.001]

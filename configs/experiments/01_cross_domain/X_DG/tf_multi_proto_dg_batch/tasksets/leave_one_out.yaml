@@ -1,0 +1,19 @@
+taskset:
+  name: "tf_multi_proto_leave_one_out"
+  description: "Leave-one-out DG tasks for TF_MultiProtoDG on the current system setting."
+  tasks:
+    - task_id: "sys17_tgt0"
+      description: "Target domain 0, source domains 1 and 2."
+      target_system_id: [17]
+      source_domain_id: [1, 2]
+      target_domain_id: [0]
+    - task_id: "sys17_tgt1"
+      description: "Target domain 1, source domains 0 and 2."
+      target_system_id: [17]
+      source_domain_id: [0, 2]
+      target_domain_id: [1]
+    - task_id: "sys17_tgt2"
+      description: "Target domain 2, source domains 0 and 1."
+      target_system_id: [17]
+      source_domain_id: [0, 1]
+      target_domain_id: [2]

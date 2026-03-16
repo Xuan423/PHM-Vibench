@@ -1,0 +1,19 @@
+taskset:
+  name: "tf_multi_proto_demo_custom_tasks"
+  description: "Reusable demo taskset showing arbitrary DG task composition."
+  tasks:
+    - task_id: "sys17_tgt0_src12"
+      description: "Single-target custom task keeping the original demo split."
+      target_system_id: [17]
+      source_domain_id: [1, 2]
+      target_domain_id: [0]
+    - task_id: "sys17_tgt1_src02"
+      description: "Alternative custom task with a different held-out target domain."
+      target_system_id: [17]
+      source_domain_id: [0, 2]
+      target_domain_id: [1]
+    - task_id: "sys17_joint_targets"
+      description: "Custom task with a held-out multi-domain evaluation slice."
+      target_system_id: [17]
+      source_domain_id: [0]
+      target_domain_id: [1, 2]
