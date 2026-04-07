@@ -32,6 +32,10 @@ class Default_dataset(Dataset): # THU_006or018_basic
                 
         # 处理数据
         self.prepare_data(metadata)
+
+    @property
+    def _is_validation_mode(self) -> bool:
+        return self.mode in {"val", "valid"}
         
     def prepare_data(self,metadata=None):
         """
@@ -40,8 +44,8 @@ class Default_dataset(Dataset): # THU_006or018_basic
         """
         self._process_single_data(self.data)
 
-        # 如果是train或valid模式，进行数据集划分
-        if self.mode in ["train", "valid"]:
+        # 如果是train或valid/val模式，进行数据集划分
+        if self.mode == "train" or self._is_validation_mode:
             self._split_data_for_mode()
             
         self.total_samples = len(self.processed_data) # L'
@@ -201,7 +205,7 @@ class Default_dataset(Dataset): # THU_006or018_basic
         if self.mode == "train":
             # 训练模式只保留训练数据
             self.processed_data = self.processed_data[:train_size]
-        elif self.mode == "valid":
+        elif self._is_validation_mode:
             # 验证模式只保留验证数据
             self.processed_data = self.processed_data[train_size:]
         self.total_samples = len(self.processed_data)

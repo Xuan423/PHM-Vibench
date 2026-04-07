@@ -91,3 +91,23 @@ def flatten_feature_tensors(time_features: torch.Tensor, freq_features: torch.Te
 
 def decode_feature_index(feature_meta: List[FeatureMeta], feature_index: int) -> FeatureMeta:
     return feature_meta[int(feature_index)]
+
+
+def filter_feature_meta(feature_meta: List[FeatureMeta], domain: str) -> List[FeatureMeta]:
+    return [item for item in feature_meta if item.domain == str(domain)]
+
+
+def build_basis_labels(operator_names: Iterable[str], indicator_names: Iterable[str], domain: str) -> List[str]:
+    prefix = "time" if str(domain) == "time" else "freq"
+    return [
+        f"{prefix}.{operator_name}.{indicator_name}"
+        for operator_name in operator_names
+        for indicator_name in indicator_names
+    ]
+
+
+def build_compact_concept_labels(role_dim: int) -> List[str]:
+    labels: List[str] = []
+    for prefix in ("time", "freq", "interaction", "gap"):
+        labels.extend([f"{prefix}.role_{idx}" for idx in range(int(role_dim))])
+    return labels

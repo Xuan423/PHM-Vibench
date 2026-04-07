@@ -1,0 +1,9 @@
+taskset:
+  name: "tfmpdg_sys27_t2_formal"
+  description: "Formal long-run taskset for sys27 T2: source domains [0,1] -> target domain [2]."
+  tasks:
+    - task_id: "sys27_t2"
+      description: "Target domain 2 with source domains 0 and 1."
+      target_system_id: [27]
+      source_domain_id: [0, 1]
+      target_domain_id: [2]

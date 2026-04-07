@@ -60,7 +60,10 @@ class Default_task(pl.LightningModule):
         self.args_environment = args_environment
 
         # 使用组件配置损失和指标
-        self.loss_fn = get_loss_fn(self.args_task.loss)
+        self.loss_fn = get_loss_fn(
+            self.args_task.loss,
+            label_smoothing=getattr(self.args_task, "label_smoothing", 0.0),
+        )
         # 假设 get_metrics 需要数据配置来确定任务类型和类别数
         self.metrics = get_metrics(self.args_task.metrics, self.metadata)
 
@@ -92,7 +95,7 @@ class Default_task(pl.LightningModule):
 
     def _compute_loss(self, y_hat: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         """计算任务损失"""
-        # 确保 y 是 long 类型用于分类损失        
+        # 确保 y 是 long 类型用于分类损失
         return self.loss_fn(y_hat, y.long() if y.dtype != torch.long else y)
 
     def _compute_metrics(self, y_hat: torch.Tensor, y: torch.Tensor, data_name: str, stage: str) -> Dict[str, torch.Tensor]:
@@ -175,7 +178,10 @@ class Default_task(pl.LightningModule):
                 step_metrics[f"{stage}_{reg_type}_reg_loss"] = reg_loss_val
 
         # 5. Contrastive (optional)
-        if extras is not None and getattr(self.args_model, 'use_contrastive_head', False):
+        use_contrastive_head = getattr(self.args_model, 'use_contrastive_head', None)
+        if use_contrastive_head is None and hasattr(self.network, "config"):
+            use_contrastive_head = getattr(self.network.config, "use_contrastive_head", False)
+        if extras is not None and bool(use_contrastive_head):
             if hasattr(self.network, 'compute_contrastive_loss'):
                 total_epochs = getattr(self.args_trainer, "num_epochs", None)
                 contrastive_out = self.network.compute_contrastive_loss(

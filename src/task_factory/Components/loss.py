@@ -9,7 +9,8 @@ from .contrastive_losses import (
     BarlowTwinsLoss, VICRegLoss
 )
 
-def get_loss_fn(loss_name: str) -> nn.Module:
+
+def get_loss_fn(loss_name: str, **kwargs) -> nn.Module:
     """Return a loss module according to ``loss_name``.
 
     Parameters
@@ -20,8 +21,9 @@ def get_loss_fn(loss_name: str) -> nn.Module:
         (``INFONCE``, ``TRIPLET``, ``SUPCON``, ``PROTOTYPICAL``, ``BARLOWTWINS``, ``VICREG``).
     """
     # loss_name = args.loss
+    label_smoothing = float(kwargs.get("label_smoothing", 0.0))
     loss_mapping = {
-        "CE": nn.CrossEntropyLoss(),
+        "CE": nn.CrossEntropyLoss(label_smoothing=label_smoothing),
         "MSE": nn.MSELoss(),
         "MAE": nn.L1Loss(),
         "BCE": nn.BCEWithLogitsLoss(),

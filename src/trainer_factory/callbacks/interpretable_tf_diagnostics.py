@@ -17,6 +17,12 @@ class InterpretableTFDiagnosticsCallback(pl.Callback):
         self.feature_map_json = self.diagnostics_dir / "feature_map.json"
         self.prototype_cards_json = self.diagnostics_dir / "prototype_cards.json"
         self.prototype_health_json = self.diagnostics_dir / "prototype_health.json"
+        self.alpha_time_json = self.diagnostics_dir / "alpha_time_report.json"
+        self.alpha_freq_json = self.diagnostics_dir / "alpha_freq_report.json"
+        self.role_basis_time_json = self.diagnostics_dir / "role_basis_time.json"
+        self.role_basis_freq_json = self.diagnostics_dir / "role_basis_freq.json"
+        self.patch_band_similarity_json = self.diagnostics_dir / "patch_band_similarity.json"
+        self.compact_concept_json = self.diagnostics_dir / "compact_concept_report.json"
         self.context_json = self.diagnostics_dir / "diagnostics_context.json"
 
     def _enabled(self, pl_module: pl.LightningModule) -> bool:
@@ -76,6 +82,12 @@ class InterpretableTFDiagnosticsCallback(pl.Callback):
         self._write_context_once(payload)
         cards = payload.get("prototype_cards")
         health = payload.get("prototype_health")
+        alpha_time = payload.get("alpha_time_report")
+        alpha_freq = payload.get("alpha_freq_report")
+        role_basis_time = payload.get("role_basis_time")
+        role_basis_freq = payload.get("role_basis_freq")
+        patch_band_similarity = payload.get("patch_band_similarity")
+        compact_concept = payload.get("compact_concept_report")
         record = {
             "epoch": payload.get("epoch"),
             "stage": payload.get("stage"),
@@ -87,6 +99,18 @@ class InterpretableTFDiagnosticsCallback(pl.Callback):
             self._append_json(self.prototype_cards_json, {**record, "items": cards})
         if health is not None:
             self._append_json(self.prototype_health_json, {**record, "items": health})
+        if alpha_time:
+            self._append_json(self.alpha_time_json, {**record, "items": alpha_time})
+        if alpha_freq:
+            self._append_json(self.alpha_freq_json, {**record, "items": alpha_freq})
+        if role_basis_time:
+            self._append_json(self.role_basis_time_json, {**record, "items": role_basis_time})
+        if role_basis_freq:
+            self._append_json(self.role_basis_freq_json, {**record, "items": role_basis_freq})
+        if patch_band_similarity:
+            self._append_json(self.patch_band_similarity_json, {**record, "items": patch_band_similarity})
+        if compact_concept:
+            self._append_json(self.compact_concept_json, {**record, "items": compact_concept})
         pl_module.network.reset_diagnostics(stage)
 
     def on_train_epoch_start(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:

@@ -1,0 +1,192 @@
+study:
+  type: "ablation"
+  name: "tfmpdg_sys27_t012_formal_phase5_20260330"
+  base_config: "configs/demo/01_cross_domain/X_DG/tf_multi_proto_dg_unified_rawres_k2_assigned.yaml"
+  output_dir: "results/demo/tfmpdg_sys27_t012_formal_phase5_20260330"
+  summary:
+    export_markdown: true
+    export_csv: true
+    export_json: true
+
+execution:
+  iterations: 5
+  default_num_epochs: 100
+  smoke_iterations: 1
+  smoke_num_epochs: 1
+  smoke_num_workers: 0
+  diagnostics_extract: true
+  continue_on_error: true
+
+variants:
+  - variant_id: "full_k2_cl_w003_tau012_neg4_divocc005_adapteffk"
+    group: "full"
+    description: "Anchor best candidate from phase4."
+    overrides:
+      trainer.gpus: 1
+      trainer.device: "cuda"
+      model.device: "cuda"
+      task.label_smoothing: 0.05
+      model.num_prototypes_per_class: 2
+      model.use_contrastive_head: true
+      model.proto_contrastive_weight: 0.003
+      model.proto_contrastive_temperature: 0.12
+      model.prototype_temperature: 0.12
+      model.prototype_assignment_temperature: 0.12
+      model.proto_contrastive_neg_topk: 4
+      model.prototype_diversity_weight: 0.005
+      model.prototype_occupancy_weight: 0.005
+      model.prototype_usage_bias_weight: 0.0
+      model.prototype_class_pool_mode: "logsumexp"
+      model.adaptive_effective_k_enabled: true
+      model.adaptive_effective_k_ready_count: 8.0
+      model.adaptive_effective_k_min: 1
+      model.adaptive_effective_k_penalty: 6.0
+      model.adaptive_logit_usage_enabled: false
+      model.export_diagnostics: false
+
+  - variant_id: "full_k2_cl_w002_tau012_neg4_divocc005_adapteffk"
+    group: "full"
+    description: "Lower CL intensity for T1 stability."
+    overrides:
+      trainer.gpus: 1
+      trainer.device: "cuda"
+      model.device: "cuda"
+      task.label_smoothing: 0.05
+      model.num_prototypes_per_class: 2
+      model.use_contrastive_head: true
+      model.proto_contrastive_weight: 0.002
+      model.proto_contrastive_temperature: 0.12
+      model.prototype_temperature: 0.12
+      model.prototype_assignment_temperature: 0.12
+      model.proto_contrastive_neg_topk: 4
+      model.prototype_diversity_weight: 0.005
+      model.prototype_occupancy_weight: 0.005
+      model.prototype_usage_bias_weight: 0.0
+      model.prototype_class_pool_mode: "logsumexp"
+      model.adaptive_effective_k_enabled: true
+      model.adaptive_effective_k_ready_count: 8.0
+      model.adaptive_effective_k_min: 1
+      model.adaptive_effective_k_penalty: 6.0
+      model.adaptive_logit_usage_enabled: false
+      model.export_diagnostics: false
+
+  - variant_id: "full_k2_cl_w004_tau012_neg4_divocc005_adapteffk"
+    group: "full"
+    description: "Higher CL intensity for stronger discriminability."
+    overrides:
+      trainer.gpus: 1
+      trainer.device: "cuda"
+      model.device: "cuda"
+      task.label_smoothing: 0.05
+      model.num_prototypes_per_class: 2
+      model.use_contrastive_head: true
+      model.proto_contrastive_weight: 0.004
+      model.proto_contrastive_temperature: 0.12
+      model.prototype_temperature: 0.12
+      model.prototype_assignment_temperature: 0.12
+      model.proto_contrastive_neg_topk: 4
+      model.prototype_diversity_weight: 0.005
+      model.prototype_occupancy_weight: 0.005
+      model.prototype_usage_bias_weight: 0.0
+      model.prototype_class_pool_mode: "logsumexp"
+      model.adaptive_effective_k_enabled: true
+      model.adaptive_effective_k_ready_count: 8.0
+      model.adaptive_effective_k_min: 1
+      model.adaptive_effective_k_penalty: 6.0
+      model.adaptive_logit_usage_enabled: false
+      model.export_diagnostics: false
+
+  - variant_id: "full_k2_cl_w003_tau012_neg2_divocc005_adapteffk"
+    group: "full"
+    description: "Softer hard-negative mining for T1 robustness."
+    overrides:
+      trainer.gpus: 1
+      trainer.device: "cuda"
+      model.device: "cuda"
+      task.label_smoothing: 0.05
+      model.num_prototypes_per_class: 2
+      model.use_contrastive_head: true
+      model.proto_contrastive_weight: 0.003
+      model.proto_contrastive_temperature: 0.12
+      model.prototype_temperature: 0.12
+      model.prototype_assignment_temperature: 0.12
+      model.proto_contrastive_neg_topk: 2
+      model.prototype_diversity_weight: 0.005
+      model.prototype_occupancy_weight: 0.005
+      model.prototype_usage_bias_weight: 0.0
+      model.prototype_class_pool_mode: "logsumexp"
+      model.adaptive_effective_k_enabled: true
+      model.adaptive_effective_k_ready_count: 8.0
+      model.adaptive_effective_k_min: 1
+      model.adaptive_effective_k_penalty: 6.0
+      model.adaptive_logit_usage_enabled: false
+      model.export_diagnostics: false
+
+  - variant_id: "nocl_k2_tau012_divocc005"
+    group: "baseline"
+    description: "No-CL baseline matched to K=2."
+    overrides:
+      trainer.gpus: 1
+      trainer.device: "cuda"
+      model.device: "cuda"
+      task.label_smoothing: 0.05
+      model.num_prototypes_per_class: 2
+      model.use_contrastive_head: false
+      model.proto_contrastive_weight: 0.0
+      model.proto_contrastive_temperature: 0.12
+      model.prototype_temperature: 0.12
+      model.prototype_assignment_temperature: 0.12
+      model.proto_contrastive_neg_topk: 4
+      model.prototype_diversity_weight: 0.005
+      model.prototype_occupancy_weight: 0.005
+      model.prototype_usage_bias_weight: 0.0
+      model.prototype_class_pool_mode: "logsumexp"
+      model.adaptive_effective_k_enabled: false
+      model.adaptive_logit_usage_enabled: false
+      model.export_diagnostics: false
+
+  - variant_id: "single_nocl_k1_tau012_divocc005"
+    group: "baseline"
+    description: "Single-prototype no-CL baseline."
+    overrides:
+      trainer.gpus: 1
+      trainer.device: "cuda"
+      model.device: "cuda"
+      task.label_smoothing: 0.05
+      model.num_prototypes_per_class: 1
+      model.use_contrastive_head: false
+      model.proto_contrastive_weight: 0.0
+      model.proto_contrastive_temperature: 0.12
+      model.prototype_temperature: 0.12
+      model.prototype_assignment_temperature: 0.12
+      model.proto_contrastive_neg_topk: 0
+      model.prototype_diversity_weight: 0.005
+      model.prototype_occupancy_weight: 0.005
+      model.prototype_usage_bias_weight: 0.0
+      model.prototype_class_pool_mode: "logsumexp"
+      model.adaptive_effective_k_enabled: false
+      model.adaptive_logit_usage_enabled: false
+      model.export_diagnostics: false
+
+  - variant_id: "single_cl_k1_w005_tau012_divocc005"
+    group: "baseline"
+    description: "Single-prototype CL baseline."
+    overrides:
+      trainer.gpus: 1
+      trainer.device: "cuda"
+      model.device: "cuda"
+      task.label_smoothing: 0.05
+      model.num_prototypes_per_class: 1
+      model.use_contrastive_head: true
+      model.proto_contrastive_weight: 0.005
+      model.proto_contrastive_temperature: 0.12
+      model.prototype_temperature: 0.12
+      model.prototype_assignment_temperature: 0.12
+      model.proto_contrastive_neg_topk: 0
+      model.prototype_diversity_weight: 0.005
+      model.prototype_occupancy_weight: 0.005
+      model.prototype_usage_bias_weight: 0.0
+      model.prototype_class_pool_mode: "logsumexp"
+      model.adaptive_effective_k_enabled: false
+      model.adaptive_logit_usage_enabled: false
+      model.export_diagnostics: false

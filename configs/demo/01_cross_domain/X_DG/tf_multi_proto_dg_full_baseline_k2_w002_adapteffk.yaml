@@ -1,4 +1,5 @@
-# Interpretable time-frequency multi-prototype DG demo
+# Final full baseline selected from formal sys27 T0/T1/T2 runs (2026-03-30).
+# Default task entry is sys27 T0. Use taskset overrides for T1/T2.
 
 pipeline: "Pipeline_01_default"
 
@@ -9,23 +10,22 @@ base_configs:
   trainer: "configs/base/trainer/default_single_gpu.yaml"
 
 environment:
-  project: "demo_tf_multi_proto_dg"
+  project: "demo_tfmpdg_full_baseline_k2_w002_adapteffk"
   seed: 42
   iterations: 5
-  output_dir: "results/demo/tf_multi_proto_dg"
-  notes: "Interpretable time-frequency multi-prototype DG demo."
+  output_dir: "results/demo/tfmpdg_full_baseline_k2_w002_adapteffk"
+  notes: "Final baseline from formal sys27 T0/T1/T2: K=2 + CL weight 0.002 + neg_topk=4 + adaptive effective-k."
 
 data:
   batch_size: 64
-  num_workers: 4
 
 task:
-  target_system_id: [27]
-  source_domain_id: [1,2]
-  target_domain_id: [0]
-  label_smoothing: 0.05
-  lr: 0.001
-  weight_decay: 0.001
+  target_system_id: [13]
+  source_domain_id: [2,0,1]
+  target_domain_id: [3]
+  label_smoothing: 0.02
+  lr: 0.01
+  weight_decay: 0.0001
 
 model:
   name: "TF_MultiProtoDG"
@@ -40,12 +40,12 @@ model:
   freq_band_count: 8
   padding_mode: "zero_right"
   role_dim: 16
-  num_prototypes_per_class: 4
+  num_prototypes_per_class: 1
   prototype_temperature: 0.12
   prototype_assignment_temperature: 0.12
   proto_contrastive_temperature: 0.3
   proto_contrastive_positive_mode: "assigned"
-  proto_contrastive_weight: 0.08
+  proto_contrastive_weight: 0.1
   proto_contrastive_neg_topk: 0
   adaptive_proto_enabled: true
   adaptive_effective_k_enabled: false
@@ -79,6 +79,6 @@ model:
 trainer:
   gpus: 1
   device: "cuda"
-  num_epochs: 100
-  patience: 50
+  num_epochs: 200
+  patience: 100
   save_last: false

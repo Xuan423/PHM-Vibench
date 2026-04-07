@@ -1,4 +1,8 @@
-# Interpretable time-frequency multi-prototype DG demo
+# Unified multi-prototype candidate tuned for stable T2 behavior.
+# Default entry uses sys27 T2. For T0/T1, only override:
+#   task.target_system_id
+#   task.source_domain_id
+#   task.target_domain_id
 
 pipeline: "Pipeline_01_default"
 
@@ -9,11 +13,11 @@ base_configs:
   trainer: "configs/base/trainer/default_single_gpu.yaml"
 
 environment:
-  project: "demo_tf_multi_proto_dg"
+  project: "demo_tf_multi_proto_dg_unified_rawres_k2_assigned"
   seed: 42
   iterations: 5
-  output_dir: "results/demo/tf_multi_proto_dg"
-  notes: "Interpretable time-frequency multi-prototype DG demo."
+  output_dir: "results/demo/tf_multi_proto_dg_unified_rawres_k2_assigned"
+  notes: "Unified candidate: raw residual + k=2 prototypes/class + assigned prototype contrastive. Default task is sys27 T2; override task.* for other leave-one-out evaluations."
 
 data:
   batch_size: 64
@@ -21,10 +25,9 @@ data:
 
 task:
   target_system_id: [27]
-  source_domain_id: [1,2]
+  source_domain_id: [1, 2]
   target_domain_id: [0]
   label_smoothing: 0.05
-  lr: 0.001
   weight_decay: 0.001
 
 model:
@@ -40,19 +43,15 @@ model:
   freq_band_count: 8
   padding_mode: "zero_right"
   role_dim: 16
-  num_prototypes_per_class: 4
-  prototype_temperature: 0.12
-  prototype_assignment_temperature: 0.12
-  proto_contrastive_temperature: 0.3
+  num_prototypes_per_class: 1
+  prototype_temperature: 0.2
+  prototype_assignment_temperature: 0.2
+  proto_contrastive_temperature: 0.2
   proto_contrastive_positive_mode: "assigned"
-  proto_contrastive_weight: 0.08
+  proto_contrastive_weight: 0.01
   proto_contrastive_neg_topk: 0
-  adaptive_proto_enabled: true
-  adaptive_effective_k_enabled: false
-  adaptive_effective_k_ready_count: 8.0
-  adaptive_effective_k_min: 1
-  adaptive_effective_k_penalty: 6.0
-  contrastive_warmup_epochs: 0
+  adaptive_proto_enabled: false
+  contrastive_warmup_epochs: 20
   channel_fusion_norm: "layernorm"
   role_nonneg: "none"
   role_input_norm: "layernorm"
@@ -64,11 +63,10 @@ model:
   cross_self_score_mode: "absmean"
   concept_norm: "layernorm"
   prototype_logit_scale_init: 6.0
-  prototype_diversity_weight: 0.005
-  prototype_occupancy_weight: 0.005
+  prototype_diversity_weight: 0.00
+  prototype_occupancy_weight: 0.00
   use_contrastive_head: true
   export_diagnostics: false
-  prototype_class_pool_mode: "logsumexp"
   prototype_card_top_t: 8
   diagnostics_max_members: 32
   classifier:
@@ -77,8 +75,4 @@ model:
     scale: 1.0
 
 trainer:
-  gpus: 1
-  device: "cuda"
-  num_epochs: 100
-  patience: 50
-  save_last: false
+  save_last: true

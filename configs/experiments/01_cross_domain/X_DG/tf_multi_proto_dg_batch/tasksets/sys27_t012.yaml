@@ -1,0 +1,19 @@
+taskset:
+  name: "tfmpdg_sys27_t012_formal"
+  description: "Formal leave-one-domain-out tasks for sys27: T0/T1/T2 combined analysis."
+  tasks:
+    - task_id: "sys27_t0"
+      description: "Target domain 0 with source domains 1 and 2."
+      target_system_id: [27]
+      source_domain_id: [1, 2]
+      target_domain_id: [0]
+    - task_id: "sys27_t1"
+      description: "Target domain 1 with source domains 0 and 2."
+      target_system_id: [27]
+      source_domain_id: [0, 2]
+      target_domain_id: [1]
+    - task_id: "sys27_t2"
+      description: "Target domain 2 with source domains 0 and 1."
+      target_system_id: [27]
+      source_domain_id: [0, 1]
+      target_domain_id: [2]

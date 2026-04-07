@@ -122,6 +122,7 @@ def call_backs(args, path):
         monitor=args.monitor,
         filename='model-{epoch:02d}-{val_loss:.4f}',
         save_top_k=getattr(args, 'save_top_k', 1),  # 从args中读取保存的模型数量
+        save_last=getattr(args, 'save_last', True),
         mode='min',
         dirpath=path
     )
