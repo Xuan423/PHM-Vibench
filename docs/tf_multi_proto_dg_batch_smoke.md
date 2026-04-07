@@ -5,13 +5,15 @@
 - Python environment: `phmbench`
 - Dataset dependency: `/mnt/e/dataset/PHMbench-raw_data/metadata.xlsx`
 - Verified target flow:
+  - canonical `main.py` entry
   - taskset-driven ablation study
   - taskset-driven hparam study
 
 ## Purpose
 
-This runbook validates the second-stage batch experiment chain for `TF_MultiProtoDG`:
+This runbook validates the canonical TF_MultiProtoDG execution chain:
 
+- canonical `main.py` smoke execution
 - reusable `taskset` loading
 - independent `ablation` and `hparam` study loading
 - generic study runner execution
@@ -26,29 +28,39 @@ The reduced smoke uses:
 - `iterations = 1`
 - `num_epochs = 1`
 - `data.num_workers = 0`
-- demo taskset: `configs/experiments/01_cross_domain/X_DG/tf_multi_proto_dg_batch/tasksets/demo_custom_tasks.yaml`
-- one ablation item: `baseline_full`
-- one hparam item: the first expanded item from the hparam grid
+- canonical taskset: `configs/experiments/01_cross_domain/X_DG/tf_multi_proto_dg_batch/tasksets/sys27_t012.yaml`
+- one ablation item: `full_model`
+- one hparam item: `pcw_0p0__ptau_0p08__ls_0p02`
+- local smoke override file: `/tmp/tfmpdg_smoke_local.yaml`
 
 ## Verified Commands
 
-### 1. Pytest-based environment smoke
+### 1. Canonical main.py smoke
 
 ```bash
-/home/xuanli/miniforge/envs/phmbench/bin/python -m pytest test/test_tf_multi_proto_batch_phmbench_smoke.py -m slow
+/home/xuanli/miniforge/envs/phmbench/bin/python main.py \
+  --config configs/demo/01_cross_domain/X_DG/tf_multi_proto_dg.yaml \
+  --override environment.output_dir=/tmp/tfmpdg_main_smoke \
+  --override environment.iterations=1 \
+  --override trainer.num_epochs=1 \
+  --override trainer.device=cpu \
+  --override trainer.gpus=0 \
+  --override trainer.early_stopping=false \
+  --override model.device=cpu \
+  --override model.export_diagnostics=false \
+  --override data.num_workers=0 \
+  --override data.batch_size=8 \
+  --override data.num_window=4
 ```
-
-Expected result:
-
-- `1 passed`
 
 ### 2. Generic CLI ablation smoke
 
 ```bash
 /home/xuanli/miniforge/envs/phmbench/bin/python scripts/run_tf_multi_proto_dg_study.py \
-  --taskset configs/experiments/01_cross_domain/X_DG/tf_multi_proto_dg_batch/tasksets/demo_custom_tasks.yaml \
+  --taskset configs/experiments/01_cross_domain/X_DG/tf_multi_proto_dg_batch/tasksets/sys27_t012.yaml \
   --study-config configs/experiments/01_cross_domain/X_DG/tf_multi_proto_dg_batch/ablation/study.yaml \
-  --limit-items baseline_full \
+  --local-config /tmp/tfmpdg_smoke_local.yaml \
+  --limit-items full_model \
   --smoke \
   --iterations 1 \
   --num-epochs 1 \
@@ -59,9 +71,10 @@ Expected result:
 
 ```bash
 /home/xuanli/miniforge/envs/phmbench/bin/python scripts/run_tf_multi_proto_dg_study.py \
-  --taskset configs/experiments/01_cross_domain/X_DG/tf_multi_proto_dg_batch/tasksets/demo_custom_tasks.yaml \
+  --taskset configs/experiments/01_cross_domain/X_DG/tf_multi_proto_dg_batch/tasksets/sys27_t012.yaml \
   --study-config configs/experiments/01_cross_domain/X_DG/tf_multi_proto_dg_batch/hparam/study.yaml \
-  --limit-items lcs_0p0__lce_0p1__tau_0p2__lr_0p001__wd_0p0 \
+  --local-config /tmp/tfmpdg_smoke_local.yaml \
+  --limit-items pcw_0p0__ptau_0p08__ls_0p02 \
   --smoke \
   --iterations 1 \
   --num-epochs 1 \
@@ -72,20 +85,31 @@ Expected result:
 
 ```bash
 bash scripts/experiments/run_tf_multi_proto_ablation_tasks.sh \
-  --taskset configs/experiments/01_cross_domain/X_DG/tf_multi_proto_dg_batch/tasksets/leave_one_out.yaml \
+  --taskset configs/experiments/01_cross_domain/X_DG/tf_multi_proto_dg_batch/tasksets/sys27_t012.yaml \
+  --local-config /tmp/tfmpdg_smoke_local.yaml \
   --smoke \
   --iterations 1 \
   --num-epochs 1 \
-  --limit-items baseline_full
+  --limit-items full_model
 ```
 
 ```bash
 bash scripts/experiments/run_tf_multi_proto_hparam_tasks.sh \
-  --taskset configs/experiments/01_cross_domain/X_DG/tf_multi_proto_dg_batch/tasksets/demo_custom_tasks.yaml \
+  --taskset configs/experiments/01_cross_domain/X_DG/tf_multi_proto_dg_batch/tasksets/sys27_t012.yaml \
+  --local-config /tmp/tfmpdg_smoke_local.yaml \
   --smoke \
   --iterations 1 \
   --num-epochs 1 \
-  --limit-items lcs_0p0__lce_0p1__tau_0p2__lr_0p001__wd_0p0
+  --limit-items pcw_0p0__ptau_0p08__ls_0p02
+```
+
+### 5. Pytest-based environment smoke
+
+```bash
+/home/xuanli/miniforge/envs/phmbench/bin/python -m pytest \
+  test/test_tf_multi_proto_batch_phmbench_smoke.py \
+  test/test_tf_multi_proto_ablation_phmbench_smoke.py \
+  -m slow
 ```
 
 ## Expected Artifacts
@@ -115,3 +139,4 @@ For hparam runs:
 - CUDA may hard-fallback to CPU if runtime initialization fails.
 - The upstream `pynvml` deprecation warning may still appear in `phmbench`.
 - Smoke mode intentionally uses low worker counts for stability.
+- The smoke local override keeps the canonical study/taskset path but forces CPU-friendly trainer/model/data settings.

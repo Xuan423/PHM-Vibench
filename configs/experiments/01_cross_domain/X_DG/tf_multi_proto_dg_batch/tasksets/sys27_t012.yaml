@@ -1,19 +1,43 @@
 taskset:
   name: "tfmpdg_sys27_t012_formal"
-  description: "Formal leave-one-domain-out tasks for sys27: T0/T1/T2 combined analysis."
+  description: "Canonical leave-one-domain-out task family for target_system_id 27."
   tasks:
     - task_id: "sys27_t0"
-      description: "Target domain 0 with source domains 1 and 2."
+      description: "Target domain 0 with source domains 1 and 2 under the sys27 family defaults."
       target_system_id: [27]
       source_domain_id: [1, 2]
       target_domain_id: [0]
+      overrides:
+        task.label_smoothing: 0.05
+        task.lr: 0.001
+        task.weight_decay: 0.001
+        trainer.num_epochs: 100
+        trainer.patience: 50
+        model.proto_contrastive_weight: 0.08
+        model.num_prototypes_per_class: 3
     - task_id: "sys27_t1"
-      description: "Target domain 1 with source domains 0 and 2."
+      description: "Target domain 1 with source domains 0 and 2 under the sys27 family defaults."
       target_system_id: [27]
       source_domain_id: [0, 2]
       target_domain_id: [1]
+      overrides:
+        task.label_smoothing: 0.05
+        task.lr: 0.001
+        task.weight_decay: 0.001
+        trainer.num_epochs: 100
+        trainer.patience: 50
+        model.proto_contrastive_weight: 0.08
+        model.num_prototypes_per_class: 3
     - task_id: "sys27_t2"
-      description: "Target domain 2 with source domains 0 and 1."
+      description: "Target domain 2 with source domains 0 and 1 under the sys27 family defaults."
       target_system_id: [27]
       source_domain_id: [0, 1]
       target_domain_id: [2]
+      overrides:
+        task.label_smoothing: 0.05
+        task.lr: 0.001
+        task.weight_decay: 0.001
+        trainer.num_epochs: 100
+        trainer.patience: 50
+        model.proto_contrastive_weight: 0.08
+        model.num_prototypes_per_class: 3

@@ -1,9 +1,17 @@
 taskset:
-  name: "tfmpdg_sys27_t2_formal"
-  description: "Formal long-run taskset for sys27 T2: source domains [0,1] -> target domain [2]."
+  name: "tfmpdg_sys13_debug_t3"
+  description: "Canonical single-task debug preset for the sys13 family."
   tasks:
-    - task_id: "sys27_t2"
-      description: "Target domain 2 with source domains 0 and 1."
-      target_system_id: [27]
-      source_domain_id: [0, 1]
-      target_domain_id: [2]
+    - task_id: "sys13_t3_debug"
+      description: "Debug preset: source domains 0, 1, and 2 -> target domain 3 under the sys13 family defaults."
+      target_system_id: [13]
+      source_domain_id: [0, 1, 2]
+      target_domain_id: [3]
+      overrides:
+        task.label_smoothing: 0.02
+        task.lr: 0.01
+        task.weight_decay: 0.0001
+        trainer.num_epochs: 200
+        trainer.patience: 100
+        model.proto_contrastive_weight: 0.1
+        model.num_prototypes_per_class: 4

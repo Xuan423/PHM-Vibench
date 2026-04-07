@@ -20,6 +20,14 @@ def _mean_or_nan(values: Sequence[float]) -> float:
     return float(sum(values) / len(values))
 
 
+def _stringify_task_axis(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple)):
+        return ",".join(str(item) for item in value)
+    return str(value)
+
+
 def _flatten_health_values(health_items: Mapping[str, Mapping[str, Any]], field: str) -> List[float]:
     values: List[float] = []
     for head_payload in health_items.values():
@@ -114,6 +122,9 @@ def collect_study_results(
             "study_type": study_type,
             "task_id": task_spec.get("task_id", ""),
             "task_description": task_spec.get("description", ""),
+            "task_target_system_id": _stringify_task_axis(task_spec.get("target_system_id", [])),
+            "task_source_domain_id": _stringify_task_axis(task_spec.get("source_domain_id", [])),
+            "task_target_domain_id": _stringify_task_axis(task_spec.get("target_domain_id", [])),
             "item_id": item_id,
             "variant_id": item_id,
             "group": item_spec.get("group", ""),
@@ -153,6 +164,9 @@ def aggregate_study_results(df: pd.DataFrame) -> pd.DataFrame:
         "study_type",
         "task_id",
         "task_description",
+        "task_target_system_id",
+        "task_source_domain_id",
+        "task_target_domain_id",
         "item_id",
         "variant_id",
         "group",
@@ -248,6 +262,9 @@ def render_study_markdown_summary(
         in {
             "study_type",
             "task_id",
+            "task_target_system_id",
+            "task_source_domain_id",
+            "task_target_domain_id",
             "item_id",
             "group",
             "num_iterations",
@@ -260,7 +277,15 @@ def render_study_markdown_summary(
     diag_cols = [
         column
         for column in summary_df.columns
-        if column in {"task_id", "item_id", "group", "notes"}
+        if column in {
+            "task_id",
+            "task_target_system_id",
+            "task_source_domain_id",
+            "task_target_domain_id",
+            "item_id",
+            "group",
+            "notes",
+        }
         or column.startswith("diag_")
         and column.endswith("_mean")
     ]

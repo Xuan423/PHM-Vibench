@@ -1,19 +1,56 @@
 taskset:
-  name: "tf_multi_proto_leave_one_out"
-  description: "Leave-one-out DG tasks for TF_MultiProtoDG on the current system setting."
+  name: "tfmpdg_sys21_leave_one_out"
+  description: "Canonical leave-one-domain-out task family for target_system_id 21."
   tasks:
-    - task_id: "sys17_tgt0"
-      description: "Target domain 0, source domains 1 and 2."
-      target_system_id: [17]
-      source_domain_id: [1, 2]
-      target_domain_id: [0]
-    - task_id: "sys17_tgt1"
-      description: "Target domain 1, source domains 0 and 2."
-      target_system_id: [17]
-      source_domain_id: [0, 2]
-      target_domain_id: [1]
-    - task_id: "sys17_tgt2"
-      description: "Target domain 2, source domains 0 and 1."
-      target_system_id: [17]
-      source_domain_id: [0, 1]
-      target_domain_id: [2]
+    - task_id: "sys21_t14"
+      description: "Target domain 14 with source domains 16, 22, and 24 under the sys21 family defaults."
+      target_system_id: [21]
+      source_domain_id: [16, 22, 24]
+      target_domain_id: [14]
+      overrides:
+        task.label_smoothing: 0.05
+        task.lr: 0.001
+        task.weight_decay: 0.001
+        trainer.num_epochs: 100
+        trainer.patience: 50
+        model.proto_contrastive_weight: 0.08
+        model.num_prototypes_per_class: 4
+    - task_id: "sys21_t16"
+      description: "Target domain 16 with source domains 14, 22, and 24 under the sys21 family defaults."
+      target_system_id: [21]
+      source_domain_id: [14, 22, 24]
+      target_domain_id: [16]
+      overrides:
+        task.label_smoothing: 0.05
+        task.lr: 0.001
+        task.weight_decay: 0.001
+        trainer.num_epochs: 100
+        trainer.patience: 50
+        model.proto_contrastive_weight: 0.08
+        model.num_prototypes_per_class: 4
+    - task_id: "sys21_t22"
+      description: "Target domain 22 with source domains 14, 16, and 24 under the sys21 family defaults."
+      target_system_id: [21]
+      source_domain_id: [14, 16, 24]
+      target_domain_id: [22]
+      overrides:
+        task.label_smoothing: 0.05
+        task.lr: 0.001
+        task.weight_decay: 0.001
+        trainer.num_epochs: 100
+        trainer.patience: 50
+        model.proto_contrastive_weight: 0.08
+        model.num_prototypes_per_class: 4
+    - task_id: "sys21_t24"
+      description: "Target domain 24 with source domains 14, 16, and 22 under the sys21 family defaults."
+      target_system_id: [21]
+      source_domain_id: [14, 16, 22]
+      target_domain_id: [24]
+      overrides:
+        task.label_smoothing: 0.05
+        task.lr: 0.001
+        task.weight_decay: 0.001
+        trainer.num_epochs: 100
+        trainer.patience: 50
+        model.proto_contrastive_weight: 0.08
+        model.num_prototypes_per_class: 4

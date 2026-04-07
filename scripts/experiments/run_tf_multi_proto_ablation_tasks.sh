@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
-TASKSET="configs/experiments/01_cross_domain/X_DG/tf_multi_proto_dg_batch/tasksets/leave_one_out.yaml"
+TASKSET="configs/experiments/01_cross_domain/X_DG/tf_multi_proto_dg_batch/tasksets/sys27_t012.yaml"
 STUDY="configs/experiments/01_cross_domain/X_DG/tf_multi_proto_dg_batch/ablation/study.yaml"
 OUTPUT_DIR="results/experiments/tf_multi_proto_dg_batch/ablation"
 LOCAL_CONFIG=""

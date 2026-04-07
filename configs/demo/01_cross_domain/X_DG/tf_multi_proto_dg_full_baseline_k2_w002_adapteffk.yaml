@@ -1,5 +1,6 @@
-# Final full baseline selected from formal sys27 T0/T1/T2 runs (2026-03-30).
-# Default task entry is sys27 T0. Use taskset overrides for T1/T2.
+# Canonical TF_MultiProtoDG mainline for the sys13 family.
+# Default task entry is sys13 target-domain 3; taskset overrides expand to the
+# full sys13 leave-one-out family.
 
 pipeline: "Pipeline_01_default"
 
@@ -10,11 +11,11 @@ base_configs:
   trainer: "configs/base/trainer/default_single_gpu.yaml"
 
 environment:
-  project: "demo_tfmpdg_full_baseline_k2_w002_adapteffk"
+  project: "demo_tfmpdg_sys13_family"
   seed: 42
   iterations: 5
-  output_dir: "results/demo/tfmpdg_full_baseline_k2_w002_adapteffk"
-  notes: "Final baseline from formal sys27 T0/T1/T2: K=2 + CL weight 0.002 + neg_topk=4 + adaptive effective-k."
+  output_dir: "results/demo/tfmpdg_sys13_family"
+  notes: "Canonical TF_MultiProtoDG family for target_system_id 13 with system-specific optimization defaults and domain-aligned multi-prototype count."
 
 data:
   batch_size: 64
@@ -40,7 +41,7 @@ model:
   freq_band_count: 8
   padding_mode: "zero_right"
   role_dim: 16
-  num_prototypes_per_class: 1
+  num_prototypes_per_class: 4
   prototype_temperature: 0.12
   prototype_assignment_temperature: 0.12
   proto_contrastive_temperature: 0.3

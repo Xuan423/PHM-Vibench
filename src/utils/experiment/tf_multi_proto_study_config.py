@@ -9,11 +9,9 @@ import yaml
 
 
 ALLOWED_HPARAM_KEYS = (
-    "model.lambda_cl_start",
-    "model.lambda_cl_end",
-    "model.temperature",
-    "task.lr",
-    "task.weight_decay",
+    "model.proto_contrastive_weight",
+    "model.prototype_temperature",
+    "task.label_smoothing",
 )
 
 _TASK_REQUIRED_KEYS = ("task_id", "target_system_id", "source_domain_id", "target_domain_id")
@@ -21,11 +19,63 @@ _TASK_ALLOWED_KEYS = set(_TASK_REQUIRED_KEYS) | {"description", "overrides"}
 _STUDY_ALLOWED_TYPES = {"ablation", "hparam"}
 
 _HPARAM_ID_ALIASES = {
-    "model.lambda_cl_start": "lcs",
-    "model.lambda_cl_end": "lce",
-    "model.temperature": "tau",
-    "task.lr": "lr",
-    "task.weight_decay": "wd",
+    "model.proto_contrastive_weight": "pcw",
+    "model.prototype_temperature": "ptau",
+    "task.label_smoothing": "ls",
+}
+
+
+@dataclass(frozen=True)
+class SystemFamilyPreset:
+    target_system_id: int
+    candidate_domains: tuple[int, ...]
+    base_config: str
+    default_label_smoothing: float
+    default_lr: float
+    default_weight_decay: float
+    default_num_epochs: int
+    default_patience: int
+    default_proto_contrastive_weight: float
+    default_num_prototypes_per_class: int
+
+
+SUPPORTED_SYSTEM_PRESETS: Dict[int, SystemFamilyPreset] = {
+    27: SystemFamilyPreset(
+        target_system_id=27,
+        candidate_domains=(0, 1, 2),
+        base_config="configs/demo/01_cross_domain/X_DG/tf_multi_proto_dg.yaml",
+        default_label_smoothing=0.05,
+        default_lr=0.001,
+        default_weight_decay=0.001,
+        default_num_epochs=100,
+        default_patience=50,
+        default_proto_contrastive_weight=0.08,
+        default_num_prototypes_per_class=3,
+    ),
+    21: SystemFamilyPreset(
+        target_system_id=21,
+        candidate_domains=(14, 16, 22, 24),
+        base_config="configs/demo/01_cross_domain/X_DG/tf_multi_proto_dg.yaml",
+        default_label_smoothing=0.05,
+        default_lr=0.001,
+        default_weight_decay=0.001,
+        default_num_epochs=100,
+        default_patience=50,
+        default_proto_contrastive_weight=0.08,
+        default_num_prototypes_per_class=4,
+    ),
+    13: SystemFamilyPreset(
+        target_system_id=13,
+        candidate_domains=(0, 1, 2, 3),
+        base_config="configs/demo/01_cross_domain/X_DG/tf_multi_proto_dg_full_baseline_k2_w002_adapteffk.yaml",
+        default_label_smoothing=0.02,
+        default_lr=0.01,
+        default_weight_decay=0.0001,
+        default_num_epochs=200,
+        default_patience=100,
+        default_proto_contrastive_weight=0.1,
+        default_num_prototypes_per_class=4,
+    ),
 }
 
 
@@ -105,6 +155,10 @@ class StudyConfig:
     path: str
 
 
+def get_system_family_preset(target_system_id: int) -> SystemFamilyPreset | None:
+    return SUPPORTED_SYSTEM_PRESETS.get(int(target_system_id))
+
+
 def _load_yaml_mapping(path: str | Path) -> Dict[str, Any]:
     file_path = Path(path)
     data = yaml.safe_load(file_path.read_text(encoding="utf-8")) or {}
@@ -132,6 +186,73 @@ def _sanitize_component(text: Any) -> str:
     return rendered
 
 
+def _validate_task_against_supported_systems(
+    *,
+    task_id: str,
+    target_system_id: tuple[int, ...],
+    source_domain_id: tuple[int, ...],
+    target_domain_id: tuple[int, ...],
+    overrides: Mapping[str, Any],
+) -> None:
+    if len(target_system_id) != 1:
+        return
+    preset = get_system_family_preset(target_system_id[0])
+    if preset is None:
+        return
+
+    candidate_set = set(preset.candidate_domains)
+    source_set = set(source_domain_id)
+    target_set = set(target_domain_id)
+
+    if len(target_domain_id) != 1:
+        raise ValueError(
+            f"Task {task_id!r} for supported system {preset.target_system_id} must target exactly one domain."
+        )
+    if not target_set.issubset(candidate_set):
+        raise ValueError(
+            f"Task {task_id!r} target domains {sorted(target_set)} are outside supported system "
+            f"{preset.target_system_id} candidate domains {list(preset.candidate_domains)}."
+        )
+    if not source_set.issubset(candidate_set):
+        raise ValueError(
+            f"Task {task_id!r} source domains {sorted(source_set)} are outside supported system "
+            f"{preset.target_system_id} candidate domains {list(preset.candidate_domains)}."
+        )
+    if source_set & target_set:
+        raise ValueError(f"Task {task_id!r} source and target domains must be disjoint.")
+    if source_set | target_set != candidate_set:
+        raise ValueError(
+            f"Task {task_id!r} must form a leave-one-out split over {list(preset.candidate_domains)}."
+        )
+
+    expected_override_values = {
+        "task.label_smoothing": preset.default_label_smoothing,
+        "task.lr": preset.default_lr,
+        "task.weight_decay": preset.default_weight_decay,
+        "trainer.num_epochs": preset.default_num_epochs,
+        "trainer.patience": preset.default_patience,
+        "model.proto_contrastive_weight": preset.default_proto_contrastive_weight,
+    }
+    for key, expected in expected_override_values.items():
+        if key not in overrides:
+            continue
+        actual = overrides[key]
+        if float(actual) != float(expected):
+            raise ValueError(
+                f"Task {task_id!r} override {key}={actual!r} does not match supported system "
+                f"{preset.target_system_id} default {expected!r}."
+            )
+
+    if "model.num_prototypes_per_class" in overrides:
+        actual_proto_count = int(overrides["model.num_prototypes_per_class"])
+        if actual_proto_count != preset.default_num_prototypes_per_class:
+            raise ValueError(
+                f"Task {task_id!r} override model.num_prototypes_per_class={actual_proto_count} "
+                f"does not match supported system {preset.target_system_id} expected value "
+                f"{preset.default_num_prototypes_per_class}."
+            )
+
+
 def _parse_task_spec(raw_task: Mapping[str, Any], index: int) -> TaskSpec:
     unknown_keys = sorted(set(raw_task.keys()) - _TASK_ALLOWED_KEYS)
     if unknown_keys:
@@ -144,7 +265,7 @@ def _parse_task_spec(raw_task: Mapping[str, Any], index: int) -> TaskSpec:
         overrides = {}
     if not isinstance(overrides, Mapping):
         raise ValueError(f"Task {index} overrides must be a mapping.")
-    return TaskSpec(
+    task_spec = TaskSpec(
         task_id=str(raw_task["task_id"]),
         description=str(raw_task.get("description", "")),
         target_system_id=_ensure_int_list("target_system_id", raw_task["target_system_id"]),
@@ -152,6 +273,14 @@ def _parse_task_spec(raw_task: Mapping[str, Any], index: int) -> TaskSpec:
         target_domain_id=_ensure_int_list("target_domain_id", raw_task["target_domain_id"]),
         overrides=dict(overrides),
     )
+    _validate_task_against_supported_systems(
+        task_id=task_spec.task_id,
+        target_system_id=task_spec.target_system_id,
+        source_domain_id=task_spec.source_domain_id,
+        target_domain_id=task_spec.target_domain_id,
+        overrides=task_spec.overrides,
+    )
+    return task_spec
 
 
 def load_taskset(taskset_path: str | Path) -> TasksetConfig:

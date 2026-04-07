@@ -13,7 +13,9 @@ from src.utils.experiment import run_study
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run taskset-driven TF_MultiProtoDG studies.")
+    parser = argparse.ArgumentParser(
+        description="Run the canonical taskset-driven TF_MultiProtoDG ablation or hparam studies."
+    )
     parser.add_argument("--taskset", type=str, required=True, help="Path to the taskset YAML.")
     parser.add_argument("--study-config", type=str, required=True, help="Path to the ablation/hparam study YAML.")
     parser.add_argument("--local-config", type=str, default=None, help="Optional local override YAML.")
