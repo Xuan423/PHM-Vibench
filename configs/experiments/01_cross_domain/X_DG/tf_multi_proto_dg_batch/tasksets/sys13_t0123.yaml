@@ -1,5 +1,5 @@
 taskset:
-  name: "tfmpdg_sys13_leave_one_out"
+  name: "tfmpdg_sys13_t0123_formal"
   description: "Canonical leave-one-domain-out task family for target_system_id 13."
   tasks:
     - task_id: "sys13_t0"

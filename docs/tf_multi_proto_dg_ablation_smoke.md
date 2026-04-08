@@ -26,8 +26,8 @@ The reduced smoke uses:
 - canonical taskset: `configs/experiments/01_cross_domain/X_DG/tf_multi_proto_dg_batch/tasksets/sys27_t012.yaml`
 - local smoke override file: `/tmp/tfmpdg_smoke_local.yaml`
 - two ablation items:
-  - `full_model`
-  - `tf_only_ce`
+  - `basic_operators_only`
+  - `basic_indicators_only`
 
 Smoke mode keeps `data.num_workers = 0` through the local override for stable CPU-side validation.
 
@@ -47,7 +47,7 @@ Smoke mode keeps `data.num_workers = 0` through the local override for stable CP
 /home/xuanli/miniforge/envs/phmbench/bin/bash scripts/experiments/run_tf_multi_proto_ablation_tasks.sh \
   --taskset configs/experiments/01_cross_domain/X_DG/tf_multi_proto_dg_batch/tasksets/sys27_t012.yaml \
   --local-config /tmp/tfmpdg_smoke_local.yaml \
-  --limit-items full_model tf_only_ce \
+  --limit-items basic_operators_only basic_indicators_only \
   --smoke \
   --iterations 1 \
   --num-epochs 1 \
@@ -71,13 +71,12 @@ Per-run outputs under each task/item directory:
 
 ## Expected Summary Semantics
 
-- `full_model`
+- `basic_operators_only`
   - `success=True`
-  - prototype auxiliary metrics are present because the mainline keeps contrastive and prototype regularization enabled
-- `tf_only_ce`
+  - only `Identity` and `IdentitySpectrum` remain active in the structured transparent front-end
+- `basic_indicators_only`
   - `success=True`
-  - `test_contrastive_loss` stays `0`
-  - prototype-assignment and prototype-update auxiliary behavior is disabled through the ablation loss-control mask
+  - only `Mean` and `BandEnergy` remain active in the structured indicator stage
 
 ## Notes
 

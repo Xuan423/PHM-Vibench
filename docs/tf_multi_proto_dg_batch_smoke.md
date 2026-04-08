@@ -29,7 +29,7 @@ The reduced smoke uses:
 - `num_epochs = 1`
 - `data.num_workers = 0`
 - canonical taskset: `configs/experiments/01_cross_domain/X_DG/tf_multi_proto_dg_batch/tasksets/sys27_t012.yaml`
-- one ablation item: `full_model`
+- one ablation item: `basic_operators_only`
 - one hparam item: `pcw_0p0__ptau_0p08__ls_0p02`
 - local smoke override file: `/tmp/tfmpdg_smoke_local.yaml`
 
@@ -60,7 +60,7 @@ The reduced smoke uses:
   --taskset configs/experiments/01_cross_domain/X_DG/tf_multi_proto_dg_batch/tasksets/sys27_t012.yaml \
   --study-config configs/experiments/01_cross_domain/X_DG/tf_multi_proto_dg_batch/ablation/study.yaml \
   --local-config /tmp/tfmpdg_smoke_local.yaml \
-  --limit-items full_model \
+  --limit-items basic_operators_only \
   --smoke \
   --iterations 1 \
   --num-epochs 1 \
@@ -90,7 +90,7 @@ bash scripts/experiments/run_tf_multi_proto_ablation_tasks.sh \
   --smoke \
   --iterations 1 \
   --num-epochs 1 \
-  --limit-items full_model
+  --limit-items basic_operators_only
 ```
 
 ```bash

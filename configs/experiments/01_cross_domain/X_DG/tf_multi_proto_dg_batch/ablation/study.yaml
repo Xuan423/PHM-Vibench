@@ -1,6 +1,6 @@
 study:
   type: "ablation"
-  name: "tf_multi_proto_dg_batch_ablation"
+  name: "tf_multi_proto_dg_mainline_ablation"
   base_config: "configs/demo/01_cross_domain/X_DG/tf_multi_proto_dg.yaml"
   output_dir: "results/experiments/tf_multi_proto_dg_batch/ablation"
   summary:
@@ -17,14 +17,6 @@ execution:
   continue_on_error: true
 
 variants:
-  - variant_id: "full_model"
-    group: "baseline"
-    description: "Full TF_MultiProtoDG mainline with both branches, residual fusion, and multi-prototype contrastive learning."
-    diagnostics_expected: false
-    overrides:
-      model.ablation.enabled: false
-      model.export_diagnostics: false
-
   - variant_id: "time_only"
     group: "branch"
     description: "Time branch only with CE supervision; frequency branch and prototype-related auxiliary learning are disabled."
@@ -76,6 +68,51 @@ variants:
       model.ablation.loss_control.prototype_update_enabled: false
       model.ablation.loss_control.diagnostics_enabled: false
 
+  - variant_id: "basic_operators_only"
+    group: "operator"
+    description: "Keep both branches and the full objective stack, but retain only the base transparent operators Identity and IdentitySpectrum."
+    diagnostics_expected: false
+    overrides:
+      model.export_diagnostics: false
+      model.ablation.enabled: true
+      model.ablation.variant_id: "basic_operators_only"
+      model.ablation.branch_masks.time: 1.0
+      model.ablation.branch_masks.freq: 1.0
+      model.ablation.operator_masks_time:
+        Identity: 1.0
+        FirstDifference: 0.0
+        DetrendMovingAverage: 0.0
+        HilbertEnvelope: 0.0
+        TKEO: 0.0
+      model.ablation.operator_masks_freq:
+        IdentitySpectrum: 1.0
+        LogSpectrum: 0.0
+        SpectralWhitening: 0.0
+        GaussianBandMask: 0.0
+
+  - variant_id: "basic_indicators_only"
+    group: "indicator"
+    description: "Keep both branches and the full objective stack, but retain only the base indicators Mean and BandEnergy."
+    diagnostics_expected: false
+    overrides:
+      model.export_diagnostics: false
+      model.ablation.enabled: true
+      model.ablation.variant_id: "basic_indicators_only"
+      model.ablation.branch_masks.time: 1.0
+      model.ablation.branch_masks.freq: 1.0
+      model.ablation.indicator_masks_time:
+        Mean: 1.0
+        Std: 0.0
+        RMS: 0.0
+        Kurtosis: 0.0
+        CrestFactor: 0.0
+        Entropy: 0.0
+      model.ablation.indicator_masks_freq:
+        BandEnergy: 1.0
+        BandRMS: 0.0
+        SpectralEntropy: 0.0
+        PeakRatio: 0.0
+
   - variant_id: "tf_single_prototype_with_contrast"
     group: "prototype"
     description: "Both branches stay active and contrastive learning is preserved, but each class uses a single prototype."
@@ -100,3 +137,11 @@ variants:
       model.export_diagnostics: false
       model.ablation.enabled: false
       model.classifier.residual_weight: 0.0
+
+  - variant_id: "full_model"
+    group: "baseline"
+    description: "Full TF_MultiProtoDG mainline with both branches, residual fusion, and multi-prototype contrastive learning."
+    diagnostics_expected: false
+    overrides:
+      model.ablation.enabled: false
+      model.export_diagnostics: false

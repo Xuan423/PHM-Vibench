@@ -1,5 +1,5 @@
 taskset:
-  name: "tfmpdg_sys13_debug_t3"
+  name: "tfmpdg_sys13_t3_debug"
   description: "Canonical single-task debug preset for the sys13 family."
   tasks:
     - task_id: "sys13_t3_debug"

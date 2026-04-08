@@ -17,6 +17,6 @@ execution:
   continue_on_error: true
 
 grid:
-  model.proto_contrastive_weight: [0.0, 0.08, 0.1]
-  model.prototype_temperature: [0.08, 0.12, 0.16]
+  model.proto_contrastive_weight: [0.05, 0.08, 0.1, 0.2]
+  model.proto_contrastive_temperature: [0.1, 0.2, 0.3, 0.4]
   task.label_smoothing: [0.02, 0.05, 0.08]
