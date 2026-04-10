@@ -179,7 +179,7 @@ class DiagnosticsState:
             ),
             "patch_band_similarity": build_patch_band_report(file_ids, s, w_t, w_f),
             "compact_concept_report": build_compact_concept_report(file_ids, h, g_t, g_f, self.role_dim),
-            "prototype_cards": self._prototype_cards(stage, prototype_head) if prototype_head is not None else [],
+            "prototype_cards": self._prototype_cards(stage, prototype_head) if prototype_head is not None else None,
             "prototype_health": prototype_health,
         }
         return payload

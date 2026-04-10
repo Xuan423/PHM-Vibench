@@ -174,6 +174,8 @@ class PrototypeHead(nn.Module):
         h: torch.Tensor,
         labels: torch.Tensor | None = None,
         head_key: str = "default",
+        assignment_enabled: bool = True,
+        update_enabled: bool = True,
     ) -> Dict[str, torch.Tensor]:
         prototypes, logit_scale_raw, class_bias, _, _, _ = self._get_buffers(head_key)
         tau = max(float(self.temperature), 1e-6)
@@ -207,13 +209,20 @@ class PrototypeHead(nn.Module):
 
         gather_index = target_class_ids.view(-1, 1, 1).expand(-1, 1, self.num_prototypes_per_class)
         target_proto_scores = proto_scores.gather(1, gather_index).squeeze(1)
-        target_proto_scores_routed = target_proto_scores
-        target_proto_probs = torch.softmax(target_proto_scores_routed / assign_tau, dim=-1)
-        prototype_assignments = target_proto_probs.argmax(dim=-1)
-        winning_proto_scores = target_proto_scores.gather(
-            1, prototype_assignments.view(-1, 1)
-        ).squeeze(1)
-        self._update_usage(head_key, target_class_ids, target_proto_probs)
+        if assignment_enabled:
+            target_proto_scores_routed = target_proto_scores
+            target_proto_probs = torch.softmax(target_proto_scores_routed / assign_tau, dim=-1)
+            prototype_assignments = target_proto_probs.argmax(dim=-1)
+            winning_proto_scores = target_proto_scores.gather(
+                1, prototype_assignments.view(-1, 1)
+            ).squeeze(1)
+            if update_enabled:
+                self._update_usage(head_key, target_class_ids, target_proto_probs)
+        else:
+            target_proto_scores_routed = None
+            target_proto_probs = None
+            prototype_assignments = None
+            winning_proto_scores = None
         return {
             "logits": logits,
             "proto_scores": proto_scores,

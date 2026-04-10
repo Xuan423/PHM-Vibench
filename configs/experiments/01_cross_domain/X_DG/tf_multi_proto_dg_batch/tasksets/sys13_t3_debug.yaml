@@ -8,10 +8,11 @@ taskset:
       source_domain_id: [0, 1, 2]
       target_domain_id: [3]
       overrides:
-        task.label_smoothing: 0.02
+        task.label_smoothing: 0.08
         task.lr: 0.01
         task.weight_decay: 0.0001
-        trainer.num_epochs: 200
-        trainer.patience: 100
-        model.proto_contrastive_weight: 0.1
+        trainer.num_epochs: 100
+        trainer.patience: 50
+        model.proto_contrastive_weight: 0.05
+        model.proto_contrastive_temperature: 0.3
         model.num_prototypes_per_class: 4

@@ -1,0 +1,60 @@
+taskset:
+  name: "tfmpdg_sys16_t10111415_formal"
+  description: "Canonical leave-one-domain-out task family for target_system_id 16."
+  tasks:
+    - task_id: "sys16_t10"
+      description: "Target domain 10 with source domains 11, 14, and 15 under the sys16 family defaults."
+      target_system_id: [16]
+      source_domain_id: [11, 14, 15]
+      target_domain_id: [10]
+      overrides:
+        task.label_smoothing: 0.02
+        task.lr: 0.001
+        task.weight_decay: 0.0001
+        trainer.num_epochs: 100
+        trainer.patience: 50
+        model.proto_contrastive_weight: 0.05
+        model.proto_contrastive_temperature: 0.3
+        model.num_prototypes_per_class: 4
+    - task_id: "sys16_t11"
+      description: "Target domain 11 with source domains 10, 14, and 15 under the sys16 family defaults."
+      target_system_id: [16]
+      source_domain_id: [10, 14, 15]
+      target_domain_id: [11]
+      overrides:
+        task.label_smoothing: 0.02
+        task.lr: 0.001
+        task.weight_decay: 0.0001
+        trainer.num_epochs: 100
+        trainer.patience: 50
+        model.proto_contrastive_weight: 0.05
+        model.proto_contrastive_temperature: 0.3
+        model.num_prototypes_per_class: 4
+    - task_id: "sys16_t14"
+      description: "Target domain 14 with source domains 10, 11, and 15 under the sys16 family defaults."
+      target_system_id: [16]
+      source_domain_id: [10, 11, 15]
+      target_domain_id: [14]
+      overrides:
+        task.label_smoothing: 0.02
+        task.lr: 0.001
+        task.weight_decay: 0.0001
+        trainer.num_epochs: 100
+        trainer.patience: 50
+        model.proto_contrastive_weight: 0.05
+        model.proto_contrastive_temperature: 0.3
+        model.num_prototypes_per_class: 4
+    - task_id: "sys16_t15"
+      description: "Target domain 15 with source domains 10, 11, and 14 under the sys16 family defaults."
+      target_system_id: [16]
+      source_domain_id: [10, 11, 14]
+      target_domain_id: [15]
+      overrides:
+        task.label_smoothing: 0.02
+        task.lr: 0.001
+        task.weight_decay: 0.0001
+        trainer.num_epochs: 100
+        trainer.patience: 50
+        model.proto_contrastive_weight: 0.05
+        model.proto_contrastive_temperature: 0.3
+        model.num_prototypes_per_class: 4

@@ -408,6 +408,16 @@ def build_model_config(args_model: Any, metadata: Any) -> TFMultiProtoDGConfig:
         ),
         loss_control=loss_control,
     )
+    if ablation.enabled and not ablation.branch_enabled:
+        raise ValueError("At least one branch mask must stay enabled for ablation runs.")
+    if (
+        ablation.loss_control.prototype_update_enabled
+        and not ablation.loss_control.prototype_assignment_enabled
+    ):
+        raise ValueError(
+            "model.ablation.loss_control.prototype_update_enabled requires "
+            "prototype_assignment_enabled to be true."
+        )
 
     lambda_cl_start = _coerce_non_negative_float(
         getattr(args_model, "lambda_cl_start", 0.0),

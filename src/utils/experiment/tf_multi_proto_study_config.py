@@ -10,7 +10,7 @@ import yaml
 
 ALLOWED_HPARAM_KEYS = (
     "model.proto_contrastive_weight",
-    "model.prototype_temperature",
+    "model.proto_contrastive_temperature",
     "task.label_smoothing",
 )
 
@@ -20,8 +20,12 @@ _STUDY_ALLOWED_TYPES = {"ablation", "hparam"}
 
 _HPARAM_ID_ALIASES = {
     "model.proto_contrastive_weight": "pcw",
-    "model.prototype_temperature": "ptau",
+    "model.proto_contrastive_temperature": "pctau",
     "task.label_smoothing": "ls",
+}
+
+_LEGACY_HPARAM_KEY_ALIASES = {
+    "model.prototype_temperature": "model.proto_contrastive_temperature",
 }
 
 
@@ -44,13 +48,25 @@ SUPPORTED_SYSTEM_PRESETS: Dict[int, SystemFamilyPreset] = {
         target_system_id=27,
         candidate_domains=(0, 1, 2),
         base_config="configs/demo/01_cross_domain/X_DG/tf_multi_proto_dg.yaml",
-        default_label_smoothing=0.05,
+        default_label_smoothing=0.08,
         default_lr=0.001,
         default_weight_decay=0.001,
         default_num_epochs=100,
         default_patience=50,
-        default_proto_contrastive_weight=0.08,
+        default_proto_contrastive_weight=0.05,
         default_num_prototypes_per_class=3,
+    ),
+    16: SystemFamilyPreset(
+        target_system_id=16,
+        candidate_domains=(10, 11, 14, 15),
+        base_config="configs/demo/01_cross_domain/X_DG/tf_multi_proto_dg.yaml",
+        default_label_smoothing=0.02,
+        default_lr=0.001,
+        default_weight_decay=0.0001,
+        default_num_epochs=100,
+        default_patience=50,
+        default_proto_contrastive_weight=0.05,
+        default_num_prototypes_per_class=4,
     ),
     21: SystemFamilyPreset(
         target_system_id=21,
@@ -68,12 +84,12 @@ SUPPORTED_SYSTEM_PRESETS: Dict[int, SystemFamilyPreset] = {
         target_system_id=13,
         candidate_domains=(0, 1, 2, 3),
         base_config="configs/demo/01_cross_domain/X_DG/tf_multi_proto_dg_full_baseline_k2_w002_adapteffk.yaml",
-        default_label_smoothing=0.02,
+        default_label_smoothing=0.08,
         default_lr=0.01,
         default_weight_decay=0.0001,
-        default_num_epochs=200,
-        default_patience=100,
-        default_proto_contrastive_weight=0.1,
+        default_num_epochs=100,
+        default_patience=50,
+        default_proto_contrastive_weight=0.05,
         default_num_prototypes_per_class=4,
     ),
 }
@@ -405,16 +421,25 @@ def expand_hparam_grid(grid: Mapping[str, Sequence[Any]]) -> List[StudyItemSpec]
 
 
 def _parse_hparam_items(grid: Mapping[str, Any]) -> tuple[StudyItemSpec, ...]:
-    unknown_keys = sorted(set(grid.keys()) - set(ALLOWED_HPARAM_KEYS))
+    normalized_grid: Dict[str, Any] = {}
+    for key, value in grid.items():
+        canonical_key = _LEGACY_HPARAM_KEY_ALIASES.get(key, key)
+        if canonical_key in normalized_grid:
+            raise ValueError(
+                f"Duplicate hparam key after alias normalization: {canonical_key!r}."
+            )
+        normalized_grid[canonical_key] = value
+
+    unknown_keys = sorted(set(normalized_grid.keys()) - set(ALLOWED_HPARAM_KEYS))
     if unknown_keys:
         raise ValueError(f"Unsupported hparam keys: {unknown_keys}.")
-    missing_keys = [key for key in ALLOWED_HPARAM_KEYS if key not in grid]
+    missing_keys = [key for key in ALLOWED_HPARAM_KEYS if key not in normalized_grid]
     if missing_keys:
         raise ValueError(f"Hparam study must define all prioritized keys: {missing_keys}.")
-    for key, values in grid.items():
+    for key, values in normalized_grid.items():
         if not isinstance(values, list) or not values:
             raise ValueError(f"Hparam grid '{key}' must be a non-empty list.")
-    items = expand_hparam_grid(grid)
+    items = expand_hparam_grid(normalized_grid)
     return tuple(items)
 
 

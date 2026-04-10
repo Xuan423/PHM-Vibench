@@ -30,7 +30,7 @@ The reduced smoke uses:
 - `data.num_workers = 0`
 - canonical taskset: `configs/experiments/01_cross_domain/X_DG/tf_multi_proto_dg_batch/tasksets/sys27_t012.yaml`
 - one ablation item: `basic_operators_only`
-- one hparam item: `pcw_0p0__ptau_0p08__ls_0p02`
+- one hparam item: `pcw_0p05__pctau_0p1__ls_0p02`
 - local smoke override file: `/tmp/tfmpdg_smoke_local.yaml`
 
 ## Verified Commands
@@ -74,7 +74,7 @@ The reduced smoke uses:
   --taskset configs/experiments/01_cross_domain/X_DG/tf_multi_proto_dg_batch/tasksets/sys27_t012.yaml \
   --study-config configs/experiments/01_cross_domain/X_DG/tf_multi_proto_dg_batch/hparam/study.yaml \
   --local-config /tmp/tfmpdg_smoke_local.yaml \
-  --limit-items pcw_0p0__ptau_0p08__ls_0p02 \
+  --limit-items pcw_0p05__pctau_0p1__ls_0p02 \
   --smoke \
   --iterations 1 \
   --num-epochs 1 \
@@ -100,7 +100,7 @@ bash scripts/experiments/run_tf_multi_proto_hparam_tasks.sh \
   --smoke \
   --iterations 1 \
   --num-epochs 1 \
-  --limit-items pcw_0p0__ptau_0p08__ls_0p02
+  --limit-items pcw_0p05__pctau_0p1__ls_0p02
 ```
 
 ### 5. Pytest-based environment smoke

@@ -334,7 +334,13 @@ class Model(nn.Module):
         z_f, a_f = self.freq_role_compression(e_f_bar)
         h_core, s, w_t, w_f, g_t, g_f = self.cross_evidence_pooling(z_t, z_f)
         h, h_residual = self._concept_with_residual(h_core, h_raw_full, h_raw_struct_masked)
-        proto_out = self.prototype_head(h, labels=labels, head_key=head_key)
+        proto_out = self.prototype_head(
+            h,
+            labels=labels,
+            head_key=head_key,
+            assignment_enabled=self.config.prototype_assignment_enabled,
+            update_enabled=self.config.prototype_update_enabled,
+        )
 
         extras: Dict[str, Any] = {
             "logits": proto_out["logits"],
@@ -551,7 +557,7 @@ class Model(nn.Module):
             return {}
         payload = self.diagnostics_state.build_stage_payload(
             stage=stage,
-            prototype_head=self.prototype_head,
+            prototype_head=(self.prototype_head if self.config.prototype_assignment_enabled else None),
             variant_id=self.config.variant_id,
             active_components=self.active_component_summary,
         )
