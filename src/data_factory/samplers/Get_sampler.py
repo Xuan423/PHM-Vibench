@@ -42,19 +42,25 @@ def _get_cddg_sampler(args_data, dataset, mode):
     return sampler
 
 def _get_dg_sampler(args_data, dataset, mode):
+    stratified_labels = bool(getattr(args_data, "train_label_stratified", False))
+    label_metadata_key = str(getattr(args_data, "label_metadata_key", "Label"))
     if mode == 'train':
         sampler = Same_system_Sampler(
             dataset, 
             batch_size=args_data.batch_size,
             shuffle=True,
-            drop_last=True
+            drop_last=True,
+            stratified_labels=stratified_labels,
+            label_metadata_key=label_metadata_key,
         )
     elif mode == 'val' or mode == 'test':
         sampler = Same_system_Sampler(
             dataset,
             batch_size=args_data.batch_size,
             shuffle=False,
-            drop_last=True
+            drop_last=True,
+            stratified_labels=False,
+            label_metadata_key=label_metadata_key,
         )
     else:
         raise ValueError(f"Unknown mode for DG sampler: {mode}")

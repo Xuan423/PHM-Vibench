@@ -37,6 +37,9 @@ def _sample_random_regions(
     region_count: int,
     region_width: int,
     sampling_mode: str = "random",
+    sample_keys: torch.Tensor | None = None,
+    sampling_epoch: int = 0,
+    sampling_seed_offset: int = 0,
     return_start_indices: bool = False,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     batch_size, num_channels, num_operators, length = x_bcod.shape
@@ -44,6 +47,23 @@ def _sample_random_regions(
     x_bcod = maybe_zero_pad_last_dim(x_bcod, padded_length)
 
     max_start = padded_length - region_width
+
+    deterministic_mode = sample_keys is not None
+    hashed_uniform: torch.Tensor | None = None
+    if deterministic_mode:
+        sample_keys = sample_keys.to(device=x_bcod.device, dtype=torch.long).view(batch_size, 1)
+        region_ids = torch.arange(region_count, device=x_bcod.device, dtype=torch.long).view(1, region_count)
+        epoch_term = int(sampling_epoch) * 1000003 + int(sampling_seed_offset)
+        h = sample_keys * 6364136223846793005
+        h = h + region_ids * 2862933555777941757
+        h = h + int(epoch_term) + 1442695040888963407
+        h = h ^ (h >> 33)
+        h = h * 3202034522624059733
+        h = h ^ (h >> 29)
+        h = h * 3935559000370003845
+        h = h ^ (h >> 32)
+        hashed_uniform = torch.abs(h)
+
     if max_start <= 0:
         start_indices = torch.zeros(
             batch_size,
@@ -62,18 +82,24 @@ def _sample_random_regions(
             lower = torch.floor(edges[:-1]).long()
             upper_exclusive = torch.ceil(edges[1:]).long()
             widths = (upper_exclusive - lower).clamp_min(1)
-            random_offsets = torch.floor(
-                torch.rand(batch_size, region_count, device=x_bcod.device) * widths.unsqueeze(0)
-            ).long()
+            if deterministic_mode:
+                random_offsets = torch.remainder(hashed_uniform, widths.unsqueeze(0))
+            else:
+                random_offsets = torch.floor(
+                    torch.rand(batch_size, region_count, device=x_bcod.device) * widths.unsqueeze(0)
+                ).long()
             start_indices = lower.unsqueeze(0) + random_offsets
             start_indices = start_indices.clamp_max(max_start)
         elif str(sampling_mode) == "random":
-            start_indices = torch.randint(
-                0,
-                max_start + 1,
-                (batch_size, region_count),
-                device=x_bcod.device,
-            )
+            if deterministic_mode:
+                start_indices = torch.remainder(hashed_uniform, max_start + 1)
+            else:
+                start_indices = torch.randint(
+                    0,
+                    max_start + 1,
+                    (batch_size, region_count),
+                    device=x_bcod.device,
+                )
         else:
             raise ValueError(f"Unsupported sampling_mode: {sampling_mode}")
 
@@ -105,6 +131,9 @@ def make_time_patches(
     padding_mode: str,
     patch_mode: str = "uniform",
     patch_width: int | None = None,
+    sample_keys: torch.Tensor | None = None,
+    sampling_epoch: int = 0,
+    sampling_seed_offset: int = 0,
     return_start_indices: bool = False,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     if x_bcol.ndim != 4:
@@ -122,6 +151,9 @@ def make_time_patches(
             region_count=patch_count,
             region_width=patch_width,
             sampling_mode="random",
+            sample_keys=sample_keys,
+            sampling_epoch=sampling_epoch,
+            sampling_seed_offset=sampling_seed_offset,
             return_start_indices=return_start_indices,
         )
     if str(patch_mode) == "random_stratified":
@@ -130,6 +162,9 @@ def make_time_patches(
             region_count=patch_count,
             region_width=patch_width,
             sampling_mode="random_stratified",
+            sample_keys=sample_keys,
+            sampling_epoch=sampling_epoch,
+            sampling_seed_offset=sampling_seed_offset,
             return_start_indices=return_start_indices,
         )
     if str(patch_mode) != "uniform":
@@ -169,6 +204,9 @@ def make_freq_bands(
     padding_mode: str,
     band_mode: str = "uniform",
     band_width: int | None = None,
+    sample_keys: torch.Tensor | None = None,
+    sampling_epoch: int = 0,
+    sampling_seed_offset: int = 0,
     return_start_indices: bool = False,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     if x_bcof.ndim != 4:
@@ -186,6 +224,9 @@ def make_freq_bands(
             region_count=band_count,
             region_width=band_width,
             sampling_mode="random",
+            sample_keys=sample_keys,
+            sampling_epoch=sampling_epoch,
+            sampling_seed_offset=sampling_seed_offset,
             return_start_indices=return_start_indices,
         )
     if str(band_mode) == "random_stratified":
@@ -194,6 +235,9 @@ def make_freq_bands(
             region_count=band_count,
             region_width=band_width,
             sampling_mode="random_stratified",
+            sample_keys=sample_keys,
+            sampling_epoch=sampling_epoch,
+            sampling_seed_offset=sampling_seed_offset,
             return_start_indices=return_start_indices,
         )
     if str(band_mode) != "uniform":

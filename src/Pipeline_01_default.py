@@ -106,7 +106,24 @@ def pipeline(args):
         data_factory = build_data(args_data, args_task)
         # 构建模型
         print("[INFO] 构建模型...")
+        model_init_seed_cfg = getattr(args_environment, "model_init_seed", None)
+        if model_init_seed_cfg is None:
+            model_init_seed = int(current_seed)
+            print(f"[INFO] 使用模型初始化种子(默认同当前seed): {model_init_seed}")
+        else:
+            try:
+                model_init_seed = int(model_init_seed_cfg)
+            except (TypeError, ValueError):
+                raise ValueError(f"model_init_seed 必须是整数，当前值: {model_init_seed_cfg!r}")
+            if model_init_seed != current_seed:
+                print(f"[INFO] 使用固定模型初始化种子: {model_init_seed}")
+        # Always reseed before model construction so initialization is decoupled
+        # from data pipeline randomness.
+        seed_everything(model_init_seed)
         model = build_model(args_model,metadata=data_factory.get_metadata())
+        if model_init_seed != current_seed:
+            # Restore per-iteration randomness for sampler/data order and training dynamics.
+            seed_everything(current_seed)
         
         # 构建任务
         print("[INFO] 构建任务...")

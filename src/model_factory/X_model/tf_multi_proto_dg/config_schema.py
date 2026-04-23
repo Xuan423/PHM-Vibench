@@ -167,7 +167,12 @@ class ClassifierConfig:
     scale: float = 1.0
     residual_input: str = "raw_feature"
     residual_weight: float = 1.0
+    residual_max_ratio: float = 0.0
+    residual_alignment_mode: str = "off"
     residual_topk: int | None = None
+    residual_rank: int | None = None
+    residual_init: str = "default"
+    residual_init_seed: int | None = None
 
 
 @dataclass(frozen=True)
@@ -204,6 +209,8 @@ class TFMultiProtoDGConfig:
     freq_band_count: int = 8
     freq_band_mode: str = "uniform"
     freq_band_width: int | None = None
+    region_sampling_mode: str = "global_random"
+    region_sampling_seed_offset: int = 0
     transparent_backbone_enabled: bool = False
     transparent_backbone_weight: float = 0.0
     transparent_backbone_layers: int = 2
@@ -277,6 +284,8 @@ class TFMultiProtoDGConfig:
     cross_adaptive_self_mix: bool = False
     concept_norm: str = "layernorm"
     prototype_logit_scale_init: float = 12.0
+    prototype_init_mode: str = "random_normal"
+    prototype_init_scale: float = 0.02
     prototype_diversity_weight: float = 0.0
     prototype_diversity_target_cos: float = 0.0
     prototype_diversity_adaptive_gain: float = 0.0
@@ -645,8 +654,42 @@ def build_model_config(args_model: Any, metadata: Any) -> TFMultiProtoDGConfig:
     classifier_residual_input = _validate_choice(
         str(_namespace_get(classifier_raw, "residual_input", "raw_feature")),
         "model.classifier.residual_input",
-        {"raw_feature", "structured_masked", "structured_topk"},
+        {
+            "raw_feature",
+            "raw_feature_topk",
+            "raw_feature_lowrank",
+            "fixed_semantic_coord",
+            "global_feature",
+            "global_feature_mlp",
+            "semantic_stats",
+            "semantic_stats_mlp",
+            "semantic_tokens_attn",
+            "local_anomaly_summary",
+            "local_anomaly_profile",
+            "structured_masked",
+            "structured_topk",
+        },
     )
+    classifier_residual_init = _validate_choice(
+        str(_namespace_get(classifier_raw, "residual_init", "default")),
+        "model.classifier.residual_init",
+        {"default", "projected_raw", "raw_svd", "feature_hash"},
+    )
+    classifier_residual_alignment_mode = _validate_choice(
+        str(_namespace_get(classifier_raw, "residual_alignment_mode", "off")),
+        "model.classifier.residual_alignment_mode",
+        {"off", "cosine"},
+    )
+    classifier_residual_init_seed_raw = _namespace_get(classifier_raw, "residual_init_seed", None)
+    if classifier_residual_init_seed_raw is None:
+        classifier_residual_init_seed = None
+    else:
+        try:
+            classifier_residual_init_seed = int(classifier_residual_init_seed_raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "model.classifier.residual_init_seed must be an integer or null."
+            ) from exc
     classifier_residual_topk_raw = _namespace_get(classifier_raw, "residual_topk", None)
     classifier_residual_topk = (
         _coerce_positive_int(
@@ -654,6 +697,15 @@ def build_model_config(args_model: Any, metadata: Any) -> TFMultiProtoDGConfig:
             "model.classifier.residual_topk",
         )
         if classifier_residual_topk_raw is not None
+        else None
+    )
+    classifier_residual_rank_raw = _namespace_get(classifier_raw, "residual_rank", None)
+    classifier_residual_rank = (
+        _coerce_positive_int(
+            classifier_residual_rank_raw,
+            "model.classifier.residual_rank",
+        )
+        if classifier_residual_rank_raw is not None
         else None
     )
     classifier = ClassifierConfig(
@@ -665,7 +717,16 @@ def build_model_config(args_model: Any, metadata: Any) -> TFMultiProtoDGConfig:
             "model.classifier.residual_weight",
             1.0,
         ),
+        residual_max_ratio=_coerce_non_negative_float(
+            _namespace_get(classifier_raw, "residual_max_ratio", 0.0),
+            "model.classifier.residual_max_ratio",
+            0.0,
+        ),
+        residual_alignment_mode=classifier_residual_alignment_mode,
         residual_topk=classifier_residual_topk,
+        residual_rank=classifier_residual_rank,
+        residual_init=classifier_residual_init,
+        residual_init_seed=classifier_residual_init_seed,
     )
 
     prototype_raw = getattr(args_model, "prototype", None)
@@ -801,6 +862,16 @@ def build_model_config(args_model: Any, metadata: Any) -> TFMultiProtoDGConfig:
         raise ValueError(
             f"model.prototype_logit_scale_init must be positive, got {prototype_logit_scale_init}."
         )
+    prototype_init_mode = _validate_choice(
+        str(getattr(args_model, "prototype_init_mode", "random_normal")),
+        "model.prototype_init_mode",
+        {"random_normal", "deterministic_anchor"},
+    )
+    prototype_init_scale = _coerce_non_negative_float(
+        getattr(args_model, "prototype_init_scale", 0.02),
+        "model.prototype_init_scale",
+        0.02,
+    )
     prototype_diversity_weight = _coerce_non_negative_float(
         getattr(args_model, "prototype_diversity_weight", 0.0),
         "model.prototype_diversity_weight",
@@ -891,6 +962,16 @@ def build_model_config(args_model: Any, metadata: Any) -> TFMultiProtoDGConfig:
         raise ValueError(
             "model.freq_band_width cannot exceed frequency bins when model.padding_mode='error'."
         )
+    region_sampling_mode = _validate_choice(
+        str(getattr(args_model, "region_sampling_mode", "global_random")),
+        "model.region_sampling_mode",
+        {"global_random", "sample_epoch_hash"},
+    )
+    region_sampling_seed_offset = _coerce_non_negative_int(
+        getattr(args_model, "region_sampling_seed_offset", 0),
+        "model.region_sampling_seed_offset",
+        0,
+    )
     transparent_backbone_enabled = bool(getattr(args_model, "transparent_backbone_enabled", False))
     transparent_backbone_weight = _coerce_non_negative_float(
         getattr(args_model, "transparent_backbone_weight", 0.0),
@@ -1045,6 +1126,8 @@ def build_model_config(args_model: Any, metadata: Any) -> TFMultiProtoDGConfig:
         ),
         freq_band_mode=freq_band_mode,
         freq_band_width=freq_band_width,
+        region_sampling_mode=region_sampling_mode,
+        region_sampling_seed_offset=region_sampling_seed_offset,
         transparent_backbone_enabled=transparent_backbone_enabled,
         transparent_backbone_weight=transparent_backbone_weight,
         transparent_backbone_layers=transparent_backbone_layers,
@@ -1118,6 +1201,8 @@ def build_model_config(args_model: Any, metadata: Any) -> TFMultiProtoDGConfig:
         cross_adaptive_self_mix=cross_adaptive_self_mix,
         concept_norm=concept_norm,
         prototype_logit_scale_init=prototype_logit_scale_init,
+        prototype_init_mode=prototype_init_mode,
+        prototype_init_scale=prototype_init_scale,
         prototype_diversity_weight=prototype_diversity_weight,
         prototype_diversity_target_cos=prototype_diversity_target_cos,
         prototype_diversity_adaptive_gain=prototype_diversity_adaptive_gain,

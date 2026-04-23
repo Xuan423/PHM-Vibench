@@ -27,6 +27,8 @@ class PrototypeHead(nn.Module):
         assignment_mode: str = "hard",
         balance_weight: float = 0.0,
         logit_scale_init: float = 12.0,
+        init_mode: str = "random_normal",
+        init_scale: float = 0.02,
     ) -> None:
         super().__init__()
         self.concept_dim = int(concept_dim)
@@ -50,6 +52,13 @@ class PrototypeHead(nn.Module):
             )
         self.balance_weight = float(balance_weight)
         self.logit_scale_init = float(logit_scale_init)
+        self.init_mode = str(init_mode)
+        if self.init_mode not in {"random_normal", "deterministic_anchor"}:
+            raise ValueError(
+                f"Unsupported init_mode={self.init_mode!r}. "
+                "Expected one of {'random_normal', 'deterministic_anchor'}."
+            )
+        self.init_scale = float(init_scale)
         self.head_to_num_classes = (
             {str(key): int(value) for key, value in num_classes.items()}
             if isinstance(num_classes, dict)
@@ -67,10 +76,57 @@ class PrototypeHead(nn.Module):
     def head_keys(self) -> List[str]:
         return list(self.head_to_num_classes.keys())
 
+    @staticmethod
+    def _build_deterministic_anchor_prototypes(
+        class_count: int,
+        num_prototypes_per_class: int,
+        concept_dim: int,
+        scale: float,
+    ) -> torch.Tensor:
+        dim_index = torch.arange(float(concept_dim), dtype=torch.float32).add(1.0)
+        prototypes = torch.zeros(
+            int(class_count),
+            int(num_prototypes_per_class),
+            int(concept_dim),
+            dtype=torch.float32,
+        )
+        target_norm = float(scale) * float(max(concept_dim, 1)) ** 0.5
+        for class_id in range(int(class_count)):
+            class_scale = float(class_id + 1)
+            anchor = (
+                torch.sin(dim_index * (0.017 * class_scale) + 0.19 * class_scale)
+                + 0.5 * torch.cos(dim_index * (0.011 * class_scale) - 0.23 * class_scale)
+            )
+            anchor = anchor - anchor.mean()
+            anchor = anchor / anchor.norm().clamp_min(1e-6)
+            for proto_id in range(int(num_prototypes_per_class)):
+                proto_scale = float(proto_id + 1)
+                offset = (
+                    torch.sin(dim_index * (0.031 * proto_scale) + 0.13 * class_scale)
+                    + 0.5 * torch.cos(dim_index * (0.029 * proto_scale) - 0.07 * class_scale)
+                )
+                offset = offset - offset.mean()
+                offset = offset / offset.norm().clamp_min(1e-6)
+                vector = anchor + 0.22 * offset
+                vector = vector - vector.mean()
+                vector = vector / vector.norm().clamp_min(1e-6)
+                prototypes[class_id, proto_id] = target_norm * vector
+        return prototypes
+
+    def _init_prototypes(self, class_count: int) -> torch.Tensor:
+        if self.init_mode == "deterministic_anchor":
+            return self._build_deterministic_anchor_prototypes(
+                class_count=class_count,
+                num_prototypes_per_class=self.num_prototypes_per_class,
+                concept_dim=self.concept_dim,
+                scale=self.init_scale,
+            )
+        return torch.randn(class_count, self.num_prototypes_per_class, self.concept_dim) * self.init_scale
+
     def _register_head(self, head_key: str, class_count: int) -> None:
         bufkey = self._sanitize_key(head_key)
         self._head_to_bufkey[head_key] = bufkey
-        proto = nn.Parameter(torch.randn(class_count, self.num_prototypes_per_class, self.concept_dim) * 0.02)
+        proto = nn.Parameter(self._init_prototypes(class_count))
         self.register_parameter(f"_proto_P_{bufkey}", proto)
         self.register_parameter(
             f"_proto_logit_scale_{bufkey}",

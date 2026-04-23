@@ -14,17 +14,23 @@ environment:
   project: "demo_tf_multi_proto_dg_sys27_sys21_family"
   seed: 42
   iterations: 5
+  # Optional: fix model parameter initialization across iterations while keeping
+  # per-iteration data/sampler randomness (set null to disable).
+  model_init_seed: null
   output_dir: "results/demo/tf_multi_proto_dg_sys27_sys21_family"
-  notes: "TF_MultiProtoDG v10-mainline clean chain: deep-global pair + anomaly-local residual + joint prototype contrastive."
+  notes: "TF_MultiProtoDG clean mainline: semantic-stats residual + deterministic prototype init + joint prototype contrastive + sample-epoch hashed random partition."
 
 data:
   batch_size: 64
   num_workers: 2
+  # Stabilize early prototype bootstrap by avoiding extreme per-batch label skew.
+  train_label_stratified: false
+  label_metadata_key: "Label"
 
 task:
   target_system_id: [27]
-  source_domain_id: [0,2]
-  target_domain_id: [2]
+  source_domain_id: [1,2]
+  target_domain_id: [0]
   label_smoothing: 0.05
   lr: 0.001
   weight_decay: 0.0005
@@ -44,6 +50,8 @@ model:
   freq_band_count: 64
   freq_band_mode: "random"
   freq_band_width: 256
+  region_sampling_mode: "global_random"
+  region_sampling_seed_offset: 17
   padding_mode: "zero_right"
   transparent_backbone_enabled: true
   transparent_backbone_weight: 1.0
@@ -62,10 +70,10 @@ model:
   proto_contrastive_temperature: 0.2
   proto_contrastive_positive_mode: "assigned"
   use_contrastive_head: true
-  proto_contrastive_weight: 0.03
+  proto_contrastive_weight: 0.08
   adaptive_proto_enabled: false
-  adaptive_proto_min_scale: 0.3
-  adaptive_proto_max_scale: 1.0
+  adaptive_proto_min_scale: 0.5
+  adaptive_proto_max_scale: 2.0
   contrastive_warmup_epochs: 0
   prototype:
     assignment_mode: "soft_balanced"
@@ -81,16 +89,19 @@ model:
   cross_self_score_mode: "absmean"
   concept_norm: "layernorm"
   prototype_logit_scale_init: 6.0
+  prototype_init_mode: "deterministic_anchor"
+  prototype_init_scale: 0.02
   cooperative_prototypes_enabled: false
   swa_enabled: false
   export_diagnostics: false
   prototype_card_top_t: 8
   diagnostics_max_members: 32
   classifier:
-    residual_input: "raw_feature"
+    residual_input: "semantic_stats"
     residual_weight: 0.05
+    residual_init: "default"
     scale: 1.0
-
+      
 trainer:
   gpus: 1
   device: "cuda"

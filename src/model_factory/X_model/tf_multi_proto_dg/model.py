@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from types import SimpleNamespace
 from typing import Any, Dict, Optional
 
@@ -70,6 +71,10 @@ class Model(nn.Module):
         self.active_component_summary = describe_active_components(self.feature_meta, feature_mask)
         self.active_component_summary["time_patch_mode"] = str(self.config.time_patch_mode)
         self.active_component_summary["freq_band_mode"] = str(self.config.freq_band_mode)
+        self.active_component_summary["region_sampling_mode"] = str(self.config.region_sampling_mode)
+        self.active_component_summary["region_sampling_seed_offset"] = int(
+            self.config.region_sampling_seed_offset
+        )
         self.active_component_summary["region_ensemble_samples"] = int(self.config.region_ensemble_samples)
         self.active_component_summary["hierarchical_evidence"] = {
             "enabled": True,
@@ -116,6 +121,32 @@ class Model(nn.Module):
         self.freq_basis_dim = (
             len(self.freq_operator_bank.operator_names) * len(self.config.freq_indicators)
         )
+        self.time_summary_topk = self._summary_topk_count(int(self.config.time_patch_count))
+        self.freq_summary_topk = self._summary_topk_count(int(self.config.freq_band_count))
+        self.global_feature_dim = int(self.config.in_channels * (self.time_basis_dim + self.freq_basis_dim))
+        self.semantic_stats_dim = int(
+            self.config.in_channels * (self.time_basis_dim + self.freq_basis_dim) * 4
+        )
+        self.time_local_anomaly_summary_dim = int(self.config.in_channels * self.time_basis_dim * 2)
+        self.freq_local_anomaly_summary_dim = int(self.config.in_channels * self.freq_basis_dim * 2)
+        self.local_anomaly_summary_dim = int(
+            self.time_local_anomaly_summary_dim + self.freq_local_anomaly_summary_dim
+        )
+        self.time_local_anomaly_profile_dim = int(
+            self.config.in_channels * self.time_basis_dim * (1 + self.time_summary_topk)
+        )
+        self.freq_local_anomaly_profile_dim = int(
+            self.config.in_channels * self.freq_basis_dim * (1 + self.freq_summary_topk)
+        )
+        self.local_anomaly_profile_dim = int(
+            self.time_local_anomaly_profile_dim + self.freq_local_anomaly_profile_dim
+        )
+        self.semantic_coord_stats_dim = 4
+        self.semantic_coord_time_token_count = int(self.config.in_channels * self.time_basis_dim)
+        self.semantic_coord_token_count = int(
+            self.config.in_channels * (self.time_basis_dim + self.freq_basis_dim)
+        )
+        self.semantic_coord_names = self._build_semantic_coord_names()
 
         self.time_channel_fusion = LocalChannelFusion(
             in_features=self.time_basis_dim,
@@ -171,8 +202,252 @@ class Model(nn.Module):
         self.global_semantic_norm = nn.LayerNorm(self.config.concept_dim)
         self.anomaly_residual_norm = nn.LayerNorm(self.config.concept_dim)
         self.anomaly_residual_proj = nn.Linear(self.config.concept_dim, self.config.concept_dim, bias=False)
-        self.raw_feature_residual_norm = nn.LayerNorm(self.feature_dim)
-        self.raw_feature_residual_proj = nn.Linear(self.feature_dim, self.config.concept_dim, bias=False)
+        self.residual_enabled = float(self.config.classifier.residual_weight) > 0.0
+        self.residual_input_mode = str(self.config.classifier.residual_input)
+        self.raw_feature_residual_topk: Optional[int] = None
+        self.raw_feature_residual_rank: Optional[int] = None
+        self.raw_feature_residual_lowrank_proj: Optional[nn.Linear] = None
+        self.raw_feature_residual_activation: Optional[nn.Module] = None
+        self.semantic_coord_token_dim: Optional[int] = None
+        self.semantic_coord_slot_count: int = 0
+        self.semantic_coord_token_norm: Optional[nn.LayerNorm] = None
+        self.semantic_coord_token_proj: Optional[nn.Linear] = None
+        self.semantic_coord_token_refine: Optional[nn.Linear] = None
+        self.semantic_coord_slot_fuse: Optional[nn.Linear] = None
+        self.semantic_coord_slot_norm: Optional[nn.LayerNorm] = None
+        self.semantic_coord_residual_proj: Optional[nn.Linear] = None
+        self.semantic_tokens_attn_dim: Optional[int] = None
+        self.semantic_tokens_attn_norm: Optional[nn.LayerNorm] = None
+        self.semantic_tokens_attn_proj: Optional[nn.Linear] = None
+        self.semantic_tokens_self_attn: Optional[nn.MultiheadAttention] = None
+        self.semantic_tokens_self_attn_norm: Optional[nn.LayerNorm] = None
+        self.semantic_tokens_ffn_in: Optional[nn.Linear] = None
+        self.semantic_tokens_ffn_out: Optional[nn.Linear] = None
+        self.semantic_tokens_ffn_norm: Optional[nn.LayerNorm] = None
+        self.semantic_tokens_query_proj: Optional[nn.Linear] = None
+        self.semantic_tokens_key_proj: Optional[nn.Linear] = None
+        self.semantic_tokens_value_proj: Optional[nn.Linear] = None
+        self.semantic_tokens_out_norm: Optional[nn.LayerNorm] = None
+        self.semantic_tokens_residual_proj: Optional[nn.Linear] = None
+        if self.residual_enabled:
+            residual_proj_in_dim = int(self.feature_dim)
+            if self.residual_input_mode == "fixed_semantic_coord":
+                token_dim = self.config.classifier.residual_rank
+                if token_dim is None:
+                    token_dim = int(self.config.concept_dim)
+                token_dim = max(16, int(token_dim))
+                self.semantic_coord_token_dim = token_dim
+                self.semantic_coord_token_norm = nn.LayerNorm(self.semantic_coord_stats_dim)
+                self.semantic_coord_token_proj = nn.Linear(
+                    self.semantic_coord_stats_dim,
+                    token_dim,
+                    bias=False,
+                )
+                self.semantic_coord_token_refine = nn.Linear(
+                    token_dim,
+                    token_dim,
+                    bias=False,
+                )
+                self.semantic_coord_slot_count = 3
+                self.semantic_coord_slot_fuse = nn.Linear(
+                    token_dim * self.semantic_coord_slot_count,
+                    token_dim,
+                    bias=False,
+                )
+                self.semantic_coord_slot_norm = nn.LayerNorm(token_dim)
+                self.semantic_coord_residual_proj = nn.Linear(
+                    token_dim,
+                    self.config.concept_dim,
+                    bias=False,
+                )
+                self.raw_feature_residual_norm = None
+                self.raw_feature_residual_proj = None
+            elif self.residual_input_mode == "semantic_tokens_attn":
+                token_dim = self.config.classifier.residual_rank
+                if token_dim is None:
+                    token_dim = int(self.config.concept_dim)
+                token_dim = max(16, int(token_dim))
+                num_heads = 4 if token_dim % 4 == 0 else 1
+                self.semantic_tokens_attn_dim = token_dim
+                self.semantic_tokens_attn_norm = nn.LayerNorm(self.semantic_coord_stats_dim)
+                self.semantic_tokens_attn_proj = nn.Linear(
+                    self.semantic_coord_stats_dim,
+                    token_dim,
+                    bias=False,
+                )
+                self.semantic_tokens_self_attn = nn.MultiheadAttention(
+                    embed_dim=token_dim,
+                    num_heads=num_heads,
+                    batch_first=True,
+                )
+                self.semantic_tokens_self_attn_norm = nn.LayerNorm(token_dim)
+                self.semantic_tokens_ffn_in = nn.Linear(token_dim, 2 * token_dim, bias=False)
+                self.semantic_tokens_ffn_out = nn.Linear(2 * token_dim, token_dim, bias=False)
+                self.semantic_tokens_ffn_norm = nn.LayerNorm(token_dim)
+                self.semantic_tokens_query_proj = nn.Linear(
+                    self.config.concept_dim,
+                    token_dim,
+                    bias=False,
+                )
+                self.semantic_tokens_key_proj = nn.Linear(token_dim, token_dim, bias=False)
+                self.semantic_tokens_value_proj = nn.Linear(token_dim, token_dim, bias=False)
+                self.semantic_tokens_out_norm = nn.LayerNorm(token_dim)
+                self.semantic_tokens_residual_proj = nn.Linear(
+                    token_dim,
+                    self.config.concept_dim,
+                    bias=False,
+                )
+                self.raw_feature_residual_norm = None
+                self.raw_feature_residual_proj = None
+            elif self.residual_input_mode == "global_feature":
+                residual_proj_in_dim = int(self.global_feature_dim)
+                self.raw_feature_residual_norm = nn.LayerNorm(residual_proj_in_dim)
+                self.raw_feature_residual_proj = nn.Linear(
+                    residual_proj_in_dim,
+                    self.config.concept_dim,
+                    bias=False,
+                )
+            elif self.residual_input_mode == "global_feature_mlp":
+                residual_proj_in_dim = int(self.global_feature_dim)
+                global_hidden_dim = max(2 * int(self.config.concept_dim), 64)
+                self.raw_feature_residual_rank = int(global_hidden_dim)
+                self.raw_feature_residual_norm = nn.LayerNorm(residual_proj_in_dim)
+                self.raw_feature_residual_lowrank_proj = nn.Linear(
+                    residual_proj_in_dim,
+                    global_hidden_dim,
+                    bias=False,
+                )
+                self.raw_feature_residual_activation = nn.GELU()
+                self.raw_feature_residual_proj = nn.Linear(
+                    global_hidden_dim,
+                    self.config.concept_dim,
+                    bias=False,
+                )
+            elif self.residual_input_mode == "semantic_stats":
+                residual_proj_in_dim = int(self.semantic_stats_dim)
+                self.raw_feature_residual_norm = nn.LayerNorm(residual_proj_in_dim)
+                self.raw_feature_residual_proj = nn.Linear(
+                    residual_proj_in_dim,
+                    self.config.concept_dim,
+                    bias=False,
+                )
+            elif self.residual_input_mode == "semantic_stats_mlp":
+                residual_proj_in_dim = int(self.semantic_stats_dim)
+                semantic_hidden_dim = max(4 * int(self.config.concept_dim), 128)
+                self.raw_feature_residual_rank = int(semantic_hidden_dim)
+                self.raw_feature_residual_norm = nn.LayerNorm(residual_proj_in_dim)
+                self.raw_feature_residual_lowrank_proj = nn.Linear(
+                    residual_proj_in_dim,
+                    semantic_hidden_dim,
+                    bias=False,
+                )
+                self.raw_feature_residual_activation = nn.GELU()
+                self.raw_feature_residual_proj = nn.Linear(
+                    semantic_hidden_dim,
+                    self.config.concept_dim,
+                    bias=False,
+                )
+            elif self.residual_input_mode == "local_anomaly_summary":
+                residual_proj_in_dim = int(self.local_anomaly_summary_dim)
+                self.raw_feature_residual_norm = nn.LayerNorm(residual_proj_in_dim)
+                self.raw_feature_residual_proj = nn.Linear(
+                    residual_proj_in_dim,
+                    self.config.concept_dim,
+                    bias=False,
+                )
+            elif self.residual_input_mode == "local_anomaly_profile":
+                residual_proj_in_dim = int(self.local_anomaly_profile_dim)
+                self.raw_feature_residual_norm = nn.LayerNorm(residual_proj_in_dim)
+                self.raw_feature_residual_proj = nn.Linear(
+                    residual_proj_in_dim,
+                    self.config.concept_dim,
+                    bias=False,
+                )
+            elif self.residual_input_mode == "raw_feature_topk":
+                topk = self.config.classifier.residual_topk
+                if topk is None:
+                    topk = self.config.top_k_features if self.config.top_k_features is not None else 512
+                self.raw_feature_residual_topk = min(max(1, int(topk)), self.feature_dim)
+                residual_proj_in_dim = int(self.raw_feature_residual_topk)
+                self.raw_feature_residual_norm = nn.LayerNorm(residual_proj_in_dim)
+                self.raw_feature_residual_proj = nn.Linear(
+                    residual_proj_in_dim, self.config.concept_dim, bias=False
+                )
+            elif self.residual_input_mode == "raw_feature_lowrank":
+                rank = self.config.classifier.residual_rank
+                if rank is None:
+                    rank = 48
+                self.raw_feature_residual_rank = min(max(1, int(rank)), self.feature_dim)
+                self.raw_feature_residual_norm = nn.LayerNorm(self.feature_dim)
+                self.raw_feature_residual_lowrank_proj = nn.Linear(
+                    self.feature_dim,
+                    self.raw_feature_residual_rank,
+                    bias=False,
+                )
+                self.raw_feature_residual_proj = nn.Linear(
+                    self.raw_feature_residual_rank,
+                    self.config.concept_dim,
+                    bias=False,
+                )
+            else:
+                self.raw_feature_residual_norm = nn.LayerNorm(residual_proj_in_dim)
+                self.raw_feature_residual_proj = nn.Linear(
+                    residual_proj_in_dim, self.config.concept_dim, bias=False
+                )
+            self._init_residual_projection_for_stability()
+        else:
+            self.raw_feature_residual_norm = None
+            self.raw_feature_residual_proj = None
+            self.raw_feature_residual_lowrank_proj = None
+            self.raw_feature_residual_activation = None
+            self.semantic_coord_token_dim = None
+            self.semantic_coord_slot_count = 0
+            self.semantic_coord_token_norm = None
+            self.semantic_coord_token_proj = None
+            self.semantic_coord_token_refine = None
+            self.semantic_coord_slot_fuse = None
+            self.semantic_coord_slot_norm = None
+            self.semantic_coord_residual_proj = None
+            self.semantic_tokens_attn_dim = None
+            self.semantic_tokens_attn_norm = None
+            self.semantic_tokens_attn_proj = None
+            self.semantic_tokens_self_attn = None
+            self.semantic_tokens_self_attn_norm = None
+            self.semantic_tokens_ffn_in = None
+            self.semantic_tokens_ffn_out = None
+            self.semantic_tokens_ffn_norm = None
+            self.semantic_tokens_query_proj = None
+            self.semantic_tokens_key_proj = None
+            self.semantic_tokens_value_proj = None
+            self.semantic_tokens_out_norm = None
+            self.semantic_tokens_residual_proj = None
+        residual_summary: Dict[str, Any] = {
+            "enabled": bool(self.residual_enabled),
+            "input_mode": str(self.residual_input_mode) if self.residual_enabled else "off",
+            "weight": float(self.config.classifier.residual_weight),
+            "max_ratio": float(self.config.classifier.residual_max_ratio),
+            "alignment_mode": str(getattr(self.config.classifier, "residual_alignment_mode", "off")),
+        }
+        if self.residual_enabled and self.residual_input_mode == "fixed_semantic_coord":
+            residual_summary["semantic_coord"] = {
+                "token_count": int(self.semantic_coord_token_count),
+                "stats": ["mean", "std", "maxabs", "global"],
+                "token_dim": int(self.semantic_coord_token_dim or 0),
+                "pooling": [
+                    "uniform_mean",
+                    "anomaly_weighted(std+maxabs)",
+                    "drift_weighted(|mean-global|)",
+                ],
+                "slot_count": int(self.semantic_coord_slot_count),
+            }
+        if self.residual_enabled and self.residual_input_mode == "semantic_tokens_attn":
+            residual_summary["semantic_tokens_attn"] = {
+                "token_count": int(self.semantic_coord_token_count),
+                "token_dim": int(self.semantic_tokens_attn_dim or 0),
+                "stats": ["mean", "std", "maxabs", "global"],
+                "pooling": "core_query_attention",
+            }
+        self.active_component_summary["residual_branch"] = residual_summary
         self.time_prototype_head = PrototypeHead(
             num_classes=self.config.num_classes,
             concept_dim=self.config.role_dim,
@@ -191,6 +466,8 @@ class Model(nn.Module):
             assignment_mode=self.config.prototype.assignment_mode,
             balance_weight=self.config.prototype.balance_weight,
             logit_scale_init=self.config.prototype_logit_scale_init,
+            init_mode=self.config.prototype_init_mode,
+            init_scale=self.config.prototype_init_scale,
         )
         self.freq_prototype_head = PrototypeHead(
             num_classes=self.config.num_classes,
@@ -210,6 +487,8 @@ class Model(nn.Module):
             assignment_mode=self.config.prototype.assignment_mode,
             balance_weight=self.config.prototype.balance_weight,
             logit_scale_init=self.config.prototype_logit_scale_init,
+            init_mode=self.config.prototype_init_mode,
+            init_scale=self.config.prototype_init_scale,
         )
         self.joint_prototype_head = PrototypeHead(
             num_classes=self.config.num_classes,
@@ -229,6 +508,8 @@ class Model(nn.Module):
             assignment_mode=self.config.prototype.assignment_mode,
             balance_weight=self.config.prototype.balance_weight,
             logit_scale_init=self.config.prototype_logit_scale_init,
+            init_mode=self.config.prototype_init_mode,
+            init_scale=self.config.prototype_init_scale,
         )
         self.cooperative_prototype_fusion = CooperativePrototypeFusion(
             weight_floor=float(self.config.cooperative_weight_floor),
@@ -241,6 +522,10 @@ class Model(nn.Module):
         self.prototype_head = self.joint_prototype_head
         # Compatibility alias for legacy tests and callback assumptions.
         self.prototype_bank = self.prototype_head
+        self.active_component_summary["prototype_init"] = {
+            "mode": str(self.config.prototype_init_mode),
+            "scale": float(self.config.prototype_init_scale),
+        }
 
         self.export_diagnostics = self.config.diagnostics_enabled
         self.diagnostics_state = DiagnosticsState(
@@ -283,6 +568,198 @@ class Model(nn.Module):
 
     def _feature_mask_on(self, device: torch.device) -> torch.Tensor:
         return self.feature_mask.to(device=device)
+
+    @staticmethod
+    def _summary_topk_count(region_count: int) -> int:
+        return max(1, int(round(math.sqrt(float(max(region_count, 1))))))
+
+    @staticmethod
+    def _topk_abs_mean(features: torch.Tensor, dim: int, k: int) -> torch.Tensor:
+        region_dim = int(features.shape[dim])
+        k = min(max(1, int(k)), region_dim)
+        topk_values = features.abs().topk(k=k, dim=dim).values
+        return topk_values.mean(dim=dim)
+
+    @staticmethod
+    def _topk_abs_values(features: torch.Tensor, dim: int, k: int) -> torch.Tensor:
+        region_dim = int(features.shape[dim])
+        k = min(max(1, int(k)), region_dim)
+        return features.abs().topk(k=k, dim=dim).values
+
+    def _sample_virtual_raw_weight(
+        self,
+        out_dim: int,
+        in_dim: int,
+        gain: float,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        limit = math.sqrt(6.0 / float(max(out_dim + in_dim, 1))) * float(gain)
+        generator = None
+        if self.config.classifier.residual_init_seed is not None:
+            generator = torch.Generator(device="cpu")
+            generator.manual_seed(int(self.config.classifier.residual_init_seed))
+        weight = torch.empty(int(out_dim), int(in_dim), dtype=dtype, device="cpu")
+        weight.uniform_(-limit, limit, generator=generator)
+        return weight
+
+    @staticmethod
+    def _feature_hash_init_weight(
+        out_dim: int,
+        in_dim: int,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        # Deterministic, seed-independent initialization for semantic residual branches.
+        weight = torch.zeros(int(out_dim), int(in_dim), dtype=dtype, device="cpu")
+        fan_in = torch.zeros(int(out_dim), dtype=torch.float32, device="cpu")
+        out_dim_i = int(out_dim)
+        for j in range(int(in_dim)):
+            h1 = ((j * 1315423911) + 2654435761) % out_dim_i
+            s1 = 1.0 if ((j * 2246822519 + 3266489917) & 1) == 0 else -1.0
+            weight[h1, j] += s1
+            fan_in[h1] += 1.0
+            h2 = ((j * 374761393) + 668265263) % out_dim_i
+            if h2 != h1:
+                s2 = 1.0 if ((j * 1597334677 + 3812015801) & 1) == 0 else -1.0
+                weight[h2, j] += s2
+                fan_in[h2] += 1.0
+        scale = fan_in.clamp_min(1.0).sqrt().unsqueeze(1).to(weight.dtype)
+        weight = weight / scale
+        return weight
+
+    def _projected_raw_global_init_weight(self, weight: torch.Tensor) -> torch.Tensor:
+        concept_dim = int(self.config.concept_dim)
+        raw_dim = int(self.feature_dim)
+        virtual_raw = self._sample_virtual_raw_weight(
+            out_dim=concept_dim,
+            in_dim=raw_dim,
+            gain=0.5,
+            dtype=weight.dtype,
+        )
+
+        channels = int(self.config.in_channels)
+        time_ops = len(self.time_operator_bank.operator_names)
+        time_indicators = len(self.config.time_indicators)
+        time_patches = int(self.config.time_patch_count)
+        freq_ops = len(self.freq_operator_bank.operator_names)
+        freq_indicators = len(self.config.freq_indicators)
+        freq_bands = int(self.config.freq_band_count)
+        time_count = channels * time_ops * time_patches * time_indicators
+
+        time_part = virtual_raw[:, :time_count].view(
+            concept_dim,
+            channels,
+            time_ops,
+            time_patches,
+            time_indicators,
+        )
+        freq_part = virtual_raw[:, time_count:].view(
+            concept_dim,
+            channels,
+            freq_ops,
+            freq_bands,
+            freq_indicators,
+        )
+        time_global = time_part.mean(dim=3) * math.sqrt(float(max(time_patches, 1)))
+        freq_global = freq_part.mean(dim=3) * math.sqrt(float(max(freq_bands, 1)))
+        projected = torch.cat(
+            [time_global.reshape(concept_dim, -1), freq_global.reshape(concept_dim, -1)],
+            dim=1,
+        )
+        return projected.to(device=weight.device, dtype=weight.dtype)
+
+    def _init_residual_projection_for_stability(self) -> None:
+        if not self.residual_enabled:
+            return
+        residual_init_mode = str(self.config.classifier.residual_init)
+        deterministic_default_modes = {
+            "global_feature",
+            "semantic_stats",
+            "local_anomaly_summary",
+            "local_anomaly_profile",
+        }
+        if (
+            residual_init_mode == "default"
+            and self.raw_feature_residual_lowrank_proj is None
+            and self.residual_input_mode in deterministic_default_modes
+        ):
+            residual_init_mode = "feature_hash"
+        # Legacy-compatible behavior:
+        # For simple one-layer residual branches, keep PyTorch Linear default init.
+        # Historical high-performing runs follow this path.
+        if (
+            residual_init_mode == "default"
+            and self.raw_feature_residual_lowrank_proj is None
+            and self.residual_input_mode != "fixed_semantic_coord"
+        ):
+            return
+        if self.residual_input_mode == "fixed_semantic_coord":
+            if self.semantic_coord_token_proj is not None:
+                nn.init.xavier_uniform_(self.semantic_coord_token_proj.weight, gain=1.0)
+            if self.semantic_coord_token_refine is not None:
+                nn.init.xavier_uniform_(self.semantic_coord_token_refine.weight, gain=0.8)
+            if self.semantic_coord_slot_fuse is not None:
+                nn.init.xavier_uniform_(self.semantic_coord_slot_fuse.weight, gain=0.6)
+            if self.semantic_coord_residual_proj is not None:
+                nn.init.xavier_uniform_(self.semantic_coord_residual_proj.weight, gain=0.1)
+            return
+        if self.raw_feature_residual_lowrank_proj is not None:
+            nn.init.xavier_uniform_(self.raw_feature_residual_lowrank_proj.weight, gain=1.0)
+        if self.raw_feature_residual_proj is None:
+            return
+        if (
+            self.residual_input_mode == "global_feature"
+            and residual_init_mode == "projected_raw"
+            and self.raw_feature_residual_lowrank_proj is None
+        ):
+            with torch.no_grad():
+                projected = self._projected_raw_global_init_weight(self.raw_feature_residual_proj.weight)
+                self.raw_feature_residual_proj.weight.copy_(projected)
+        elif residual_init_mode == "feature_hash" and self.raw_feature_residual_lowrank_proj is None:
+            with torch.no_grad():
+                hashed = self._feature_hash_init_weight(
+                    out_dim=int(self.raw_feature_residual_proj.weight.shape[0]),
+                    in_dim=int(self.raw_feature_residual_proj.weight.shape[1]),
+                    dtype=self.raw_feature_residual_proj.weight.dtype,
+                )
+                self.raw_feature_residual_proj.weight.copy_(
+                    hashed.to(
+                        device=self.raw_feature_residual_proj.weight.device,
+                        dtype=self.raw_feature_residual_proj.weight.dtype,
+                    )
+                )
+        elif (
+            self.residual_input_mode == "raw_feature_lowrank"
+            and residual_init_mode == "raw_svd"
+            and self.raw_feature_residual_lowrank_proj is not None
+        ):
+            rank = int(self.raw_feature_residual_lowrank_proj.weight.shape[0])
+            virtual_raw = self._sample_virtual_raw_weight(
+                out_dim=int(self.config.concept_dim),
+                in_dim=int(self.feature_dim),
+                gain=0.5,
+                dtype=self.raw_feature_residual_proj.weight.dtype,
+            )
+            u, s, vh = torch.linalg.svd(virtual_raw, full_matrices=False)
+            effective_rank = min(rank, int(s.shape[0]))
+            lowrank_weight = torch.zeros_like(self.raw_feature_residual_lowrank_proj.weight)
+            out_weight = torch.zeros_like(self.raw_feature_residual_proj.weight)
+            lowrank_weight[:effective_rank] = vh[:effective_rank]
+            out_weight[:, :effective_rank] = u[:, :effective_rank] * s[:effective_rank].unsqueeze(0)
+            with torch.no_grad():
+                self.raw_feature_residual_lowrank_proj.weight.copy_(
+                    lowrank_weight.to(
+                        device=self.raw_feature_residual_lowrank_proj.weight.device,
+                        dtype=self.raw_feature_residual_lowrank_proj.weight.dtype,
+                    )
+                )
+                self.raw_feature_residual_proj.weight.copy_(
+                    out_weight.to(
+                        device=self.raw_feature_residual_proj.weight.device,
+                        dtype=self.raw_feature_residual_proj.weight.dtype,
+                    )
+                )
+        else:
+            nn.init.xavier_uniform_(self.raw_feature_residual_proj.weight, gain=0.5)
 
     def _should_use_eval_mc(self) -> bool:
         return (
@@ -332,6 +809,103 @@ class Model(nn.Module):
                 names.append(f"tspn.{feature_name}.ch{channel_index}")
         return names
 
+    def _build_semantic_coord_names(self) -> list[str]:
+        names: list[str] = []
+        for channel_index in range(int(self.config.in_channels)):
+            for operator_name in self.time_operator_bank.operator_names:
+                for indicator_name in self.config.time_indicators:
+                    names.append(f"time.ch{channel_index}.{operator_name}.{indicator_name}")
+            for operator_name in self.freq_operator_bank.operator_names:
+                for indicator_name in self.config.freq_indicators:
+                    names.append(f"freq.ch{channel_index}.{operator_name}.{indicator_name}")
+        return names
+
+    def _semantic_coord_residual_forward(
+        self,
+        semantic_coord_tokens: torch.Tensor,
+        _global_feature: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if (
+            self.semantic_coord_token_norm is None
+            or self.semantic_coord_token_proj is None
+            or self.semantic_coord_token_refine is None
+            or self.semantic_coord_slot_fuse is None
+            or self.semantic_coord_slot_norm is None
+            or self.semantic_coord_residual_proj is None
+        ):
+            raise RuntimeError("fixed_semantic_coord residual modules are not initialized.")
+        token_hidden = self.semantic_coord_token_norm(semantic_coord_tokens)
+        token_hidden = self.semantic_coord_token_proj(token_hidden)
+        token_hidden = F.gelu(token_hidden)
+        token_hidden = token_hidden + self.semantic_coord_token_refine(token_hidden)
+        token_hidden = F.layer_norm(token_hidden, (int(token_hidden.shape[-1]),))
+        eps = 1e-6
+        anomaly_strength = semantic_coord_tokens[..., 1].abs() + semantic_coord_tokens[..., 2].abs()
+        drift_strength = (semantic_coord_tokens[..., 0] - semantic_coord_tokens[..., 3]).abs()
+
+        uniform_weights = torch.full_like(anomaly_strength, 1.0 / float(anomaly_strength.shape[1]))
+        anomaly_logits = torch.log(anomaly_strength + eps)
+        drift_logits = torch.log(drift_strength + eps)
+        anomaly_weights = torch.softmax(anomaly_logits, dim=1)
+        drift_weights = torch.softmax(drift_logits, dim=1)
+
+        pooled_uniform = torch.sum(uniform_weights.unsqueeze(-1) * token_hidden, dim=1)
+        pooled_anomaly = torch.sum(anomaly_weights.unsqueeze(-1) * token_hidden, dim=1)
+        pooled_drift = torch.sum(drift_weights.unsqueeze(-1) * token_hidden, dim=1)
+
+        pooled = torch.cat([pooled_uniform, pooled_anomaly, pooled_drift], dim=-1)
+        pooled = self.semantic_coord_slot_fuse(pooled)
+        pooled = self.semantic_coord_slot_norm(F.gelu(pooled))
+        residual = self.semantic_coord_residual_proj(pooled)
+        semantic_coord_attention = torch.stack(
+            [uniform_weights, anomaly_weights, drift_weights],
+            dim=1,
+        )
+        return torch.nan_to_num(residual), torch.nan_to_num(semantic_coord_attention)
+
+    def _semantic_tokens_attn_forward(
+        self,
+        semantic_coord_tokens: torch.Tensor,
+        h_core: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if (
+            self.semantic_tokens_attn_norm is None
+            or self.semantic_tokens_attn_proj is None
+            or self.semantic_tokens_self_attn is None
+            or self.semantic_tokens_self_attn_norm is None
+            or self.semantic_tokens_ffn_in is None
+            or self.semantic_tokens_ffn_out is None
+            or self.semantic_tokens_ffn_norm is None
+            or self.semantic_tokens_query_proj is None
+            or self.semantic_tokens_key_proj is None
+            or self.semantic_tokens_value_proj is None
+            or self.semantic_tokens_out_norm is None
+            or self.semantic_tokens_residual_proj is None
+        ):
+            raise RuntimeError("semantic_tokens_attn residual modules are not initialized.")
+        tokens = self.semantic_tokens_attn_norm(semantic_coord_tokens)
+        tokens = F.gelu(self.semantic_tokens_attn_proj(tokens))
+        self_attn_out, _ = self.semantic_tokens_self_attn(
+            tokens,
+            tokens,
+            tokens,
+            need_weights=False,
+        )
+        tokens = self.semantic_tokens_self_attn_norm(tokens + self_attn_out)
+        token_ffn = self.semantic_tokens_ffn_out(F.gelu(self.semantic_tokens_ffn_in(tokens)))
+        tokens = self.semantic_tokens_ffn_norm(tokens + token_ffn)
+
+        query = self.semantic_tokens_query_proj(h_core).unsqueeze(1)
+        key = self.semantic_tokens_key_proj(tokens)
+        value = self.semantic_tokens_value_proj(tokens)
+        scale = math.sqrt(float(max(int(key.shape[-1]), 1)))
+        attn_logits = torch.sum(query * key, dim=-1) / scale
+        attn_weights = torch.softmax(attn_logits, dim=-1)
+        pooled = torch.sum(attn_weights.unsqueeze(-1) * value, dim=1)
+        pooled = self.semantic_tokens_out_norm(pooled)
+        residual = self.semantic_tokens_residual_proj(pooled)
+        return torch.nan_to_num(residual), torch.nan_to_num(attn_weights)
+
     @staticmethod
     def _apply_operator_bank_on_regions(
         regions_bcrw: torch.Tensor,
@@ -372,6 +946,29 @@ class Model(nn.Module):
             return torch.as_tensor(file_ids_raw, device=device, dtype=torch.long)
         except Exception:
             return torch.zeros(1, device=device, dtype=torch.long)
+
+    def _build_region_sampling_keys(
+        self,
+        x_bcl: torch.Tensor,
+        file_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        file_ids = file_ids.to(device=x_bcl.device, dtype=torch.long).view(-1)
+        sample_count = int(x_bcl.shape[0])
+        if int(file_ids.numel()) != sample_count:
+            if int(file_ids.numel()) == 1:
+                file_ids = file_ids.expand(sample_count)
+            else:
+                file_ids = torch.zeros(sample_count, device=x_bcl.device, dtype=torch.long)
+        stride = max(1, int(x_bcl.shape[-1]) // 32)
+        coarse = x_bcl[:, :, ::stride]
+        mean_q = torch.round(coarse.mean(dim=(1, 2)) * 1e4).to(torch.long)
+        std_q = torch.round(coarse.std(dim=(1, 2), unbiased=False) * 1e4).to(torch.long)
+        energy_q = torch.round((coarse.square().mean(dim=(1, 2))) * 1e4).to(torch.long)
+        keys = file_ids * 1315423911
+        keys = keys ^ (mean_q * 2654435761)
+        keys = keys ^ (std_q * 2246822519)
+        keys = keys ^ (energy_q * 3266489917)
+        return keys
 
     def resolve_head_key(self, file_ids: Optional[torch.Tensor]) -> str:
         if len(self.prototype_head.head_keys) == 1:
@@ -423,38 +1020,127 @@ class Model(nn.Module):
         h_core: torch.Tensor,
         h_raw_full: torch.Tensor,
         h_raw_struct_masked: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        h_raw_global_feature: torch.Tensor,
+        h_raw_semantic_stats: torch.Tensor,
+        h_raw_semantic_coord_tokens: torch.Tensor,
+        h_raw_local_anomaly_summary: torch.Tensor,
+        h_raw_local_anomaly_profile: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, Dict[str, Optional[torch.Tensor]]]:
+        if not self.residual_enabled:
+            return h_core, h_core.new_zeros(h_core.shape), {
+                "topk_indices": None,
+                "topk_values": None,
+                "semantic_coord_attention": None,
+                "residual_ratio_scale": None,
+                "residual_alignment_gate": None,
+            }
         residual_weight = float(self.config.classifier.residual_weight)
-        if residual_weight <= 0.0:
-            return h_core, h_core.new_zeros(h_core.shape)
+        residual_details: Dict[str, Optional[torch.Tensor]] = {
+            "topk_indices": None,
+            "topk_values": None,
+            "semantic_coord_attention": None,
+            "residual_ratio_scale": None,
+            "residual_alignment_gate": None,
+        }
 
         residual_input = str(self.config.classifier.residual_input)
-        if residual_input == "raw_feature":
-            residual_source = h_raw_full
-        elif residual_input == "structured_topk":
-            residual_source = h_raw_struct_masked
-            topk = self.config.classifier.residual_topk
-            if topk is None:
-                topk = self.config.top_k_features if self.config.top_k_features is not None else 64
-            k = min(int(topk), residual_source.shape[-1])
-            if k > 0 and k < residual_source.shape[-1]:
-                topk_idx = residual_source.abs().topk(k=k, dim=-1).indices
-                topk_mask = torch.zeros_like(residual_source).scatter(1, topk_idx, 1.0)
-                residual_source = residual_source * topk_mask
+        if residual_input == "fixed_semantic_coord":
+            residual, semantic_coord_attention = self._semantic_coord_residual_forward(
+                h_raw_semantic_coord_tokens,
+                h_raw_global_feature,
+            )
+            residual_details["semantic_coord_attention"] = semantic_coord_attention
+        elif residual_input == "semantic_tokens_attn":
+            residual, semantic_token_attention = self._semantic_tokens_attn_forward(
+                h_raw_semantic_coord_tokens,
+                h_core,
+            )
+            residual_details["semantic_coord_attention"] = semantic_token_attention.unsqueeze(1)
         else:
-            residual_source = h_raw_struct_masked
-        residual = self.raw_feature_residual_proj(self.raw_feature_residual_norm(residual_source))
+            if self.raw_feature_residual_norm is None or self.raw_feature_residual_proj is None:
+                return h_core, h_core.new_zeros(h_core.shape), residual_details
+            if residual_input == "raw_feature":
+                residual_source = h_raw_full
+            elif residual_input in {"global_feature", "global_feature_mlp"}:
+                residual_source = h_raw_global_feature
+            elif residual_input in {"semantic_stats", "semantic_stats_mlp"}:
+                residual_source = h_raw_semantic_stats
+            elif residual_input == "local_anomaly_summary":
+                residual_source = h_raw_local_anomaly_summary
+            elif residual_input == "local_anomaly_profile":
+                residual_source = h_raw_local_anomaly_profile
+            elif residual_input == "raw_feature_topk":
+                residual_source = h_raw_full
+                topk = self.raw_feature_residual_topk
+                if topk is None:
+                    topk = self.config.classifier.residual_topk
+                if topk is None:
+                    topk = self.config.top_k_features if self.config.top_k_features is not None else 512
+                k = min(max(1, int(topk)), residual_source.shape[-1])
+                topk_idx = residual_source.abs().topk(k=k, dim=-1).indices
+                residual_details["topk_indices"] = topk_idx
+                residual_details["topk_values"] = residual_source.gather(1, topk_idx)
+                residual_source = residual_source.gather(1, topk_idx)
+            elif residual_input == "raw_feature_lowrank":
+                residual_source = h_raw_full
+            elif residual_input == "structured_topk":
+                residual_source = h_raw_struct_masked
+                topk = self.config.classifier.residual_topk
+                if topk is None:
+                    topk = self.config.top_k_features if self.config.top_k_features is not None else 64
+                k = min(int(topk), residual_source.shape[-1])
+                if k > 0 and k < residual_source.shape[-1]:
+                    topk_idx = residual_source.abs().topk(k=k, dim=-1).indices
+                    topk_mask = torch.zeros_like(residual_source).scatter(1, topk_idx, 1.0)
+                    residual_source = residual_source * topk_mask
+            else:
+                residual_source = h_raw_struct_masked
+            residual_hidden = self.raw_feature_residual_norm(residual_source)
+            if self.raw_feature_residual_lowrank_proj is not None:
+                residual_hidden = self.raw_feature_residual_lowrank_proj(residual_hidden)
+            if self.raw_feature_residual_activation is not None:
+                residual_hidden = self.raw_feature_residual_activation(residual_hidden)
+            residual = self.raw_feature_residual_proj(residual_hidden)
         residual = float(self.config.classifier.scale) * residual
-        return h_core + residual_weight * residual, residual
+        residual_max_ratio = float(getattr(self.config.classifier, "residual_max_ratio", 0.0))
+        if residual_max_ratio > 0.0:
+            eps = 1e-6
+            core_norm = h_core.norm(dim=-1, keepdim=True).clamp_min(eps)
+            residual_norm = residual.norm(dim=-1, keepdim=True).clamp_min(eps)
+            max_allowed = residual_max_ratio * core_norm
+            residual_ratio_scale = torch.clamp(max_allowed / residual_norm, max=1.0)
+            residual = residual * residual_ratio_scale
+            residual_details["residual_ratio_scale"] = residual_ratio_scale.squeeze(-1)
+        residual_alignment_mode = str(getattr(self.config.classifier, "residual_alignment_mode", "off"))
+        if residual_alignment_mode == "cosine":
+            alignment = F.cosine_similarity(h_core, residual, dim=-1, eps=1e-6).unsqueeze(-1)
+            alignment_gate = 0.5 * (alignment + 1.0)
+            residual = residual * alignment_gate
+            residual_details["residual_alignment_gate"] = alignment_gate.squeeze(-1)
+        return h_core + residual_weight * residual, residual, residual_details
 
-    def _extract_feature_tensors(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def _extract_feature_tensors(
+        self,
+        x: torch.Tensor,
+        file_ids: torch.Tensor | None = None,
+        sampling_pass: int = 0,
+    ) -> Dict[str, torch.Tensor]:
         x_bcl = to_bcl(x)
+        sampling_mode = str(getattr(self.config, "region_sampling_mode", "global_random"))
+        runtime_epoch = int(getattr(self, "runtime_epoch", 0))
+        sampling_epoch = runtime_epoch + max(int(sampling_pass), 0) * 9973
+        sample_keys = None
+        if sampling_mode == "sample_epoch_hash" and file_ids is not None:
+            sample_keys = self._build_region_sampling_keys(x_bcl=x_bcl, file_ids=file_ids)
         raw_time_patches, time_patch_starts = make_time_patches(
             x_bcl.unsqueeze(2),
             self.config.time_patch_count,
             self.config.padding_mode,
             patch_mode=self.config.time_patch_mode,
             patch_width=self.config.time_patch_width,
+            sample_keys=sample_keys,
+            sampling_epoch=sampling_epoch,
+            sampling_seed_offset=int(self.config.region_sampling_seed_offset),
             return_start_indices=True,
         )
         raw_time_patches = raw_time_patches.squeeze(2)
@@ -466,6 +1152,9 @@ class Model(nn.Module):
             self.config.padding_mode,
             band_mode=self.config.freq_band_mode,
             band_width=self.config.freq_band_width,
+            sample_keys=sample_keys,
+            sampling_epoch=sampling_epoch,
+            sampling_seed_offset=int(self.config.region_sampling_seed_offset) + 7919,
             return_start_indices=True,
         )
         raw_freq_bands = raw_freq_bands.squeeze(2)
@@ -493,6 +1182,85 @@ class Model(nn.Module):
 
         h_raw_full = flatten_feature_tensors(time_features, freq_features)
         h_raw_struct_masked = flatten_feature_tensors(time_features_masked, freq_features_masked)
+        h_raw_global_feature = flatten_feature_tensors(
+            time_global_features_masked,
+            freq_global_features_masked,
+        )
+        time_sem_mean = time_features_masked.mean(dim=3)
+        time_sem_std = time_features_masked.std(dim=3, unbiased=False)
+        time_sem_max = time_features_masked.amax(dim=3)
+        time_sem_min = time_features_masked.amin(dim=3)
+        time_sem_maxabs = time_features_masked.abs().amax(dim=3)
+        freq_sem_mean = freq_features_masked.mean(dim=3)
+        freq_sem_std = freq_features_masked.std(dim=3, unbiased=False)
+        freq_sem_max = freq_features_masked.amax(dim=3)
+        freq_sem_min = freq_features_masked.amin(dim=3)
+        freq_sem_maxabs = freq_features_masked.abs().amax(dim=3)
+        time_global_sem = time_global_features_masked.squeeze(3)
+        freq_global_sem = freq_global_features_masked.squeeze(3)
+        time_topk_abs = self._topk_abs_mean(
+            time_features_masked,
+            dim=3,
+            k=self.time_summary_topk,
+        )
+        freq_topk_abs = self._topk_abs_mean(
+            freq_features_masked,
+            dim=3,
+            k=self.freq_summary_topk,
+        )
+        time_topk_profile = self._topk_abs_values(
+            time_features_masked,
+            dim=3,
+            k=self.time_summary_topk,
+        )
+        freq_topk_profile = self._topk_abs_values(
+            freq_features_masked,
+            dim=3,
+            k=self.freq_summary_topk,
+        )
+        h_raw_semantic_stats = torch.cat(
+            [
+                time_sem_mean.flatten(1),
+                time_sem_std.flatten(1),
+                time_sem_max.flatten(1),
+                time_sem_min.flatten(1),
+                freq_sem_mean.flatten(1),
+                freq_sem_std.flatten(1),
+                freq_sem_max.flatten(1),
+                freq_sem_min.flatten(1),
+            ],
+            dim=-1,
+        )
+        time_semantic_coord_tokens = torch.stack(
+            [time_sem_mean, time_sem_std, time_sem_maxabs, time_global_sem],
+            dim=-1,
+        ).reshape(x_bcl.shape[0], -1, self.semantic_coord_stats_dim)
+        freq_semantic_coord_tokens = torch.stack(
+            [freq_sem_mean, freq_sem_std, freq_sem_maxabs, freq_global_sem],
+            dim=-1,
+        ).reshape(x_bcl.shape[0], -1, self.semantic_coord_stats_dim)
+        h_raw_semantic_coord_tokens = torch.cat(
+            [time_semantic_coord_tokens, freq_semantic_coord_tokens],
+            dim=1,
+        )
+        h_raw_local_anomaly_summary = torch.cat(
+            [
+                time_sem_std.flatten(1),
+                time_topk_abs.flatten(1),
+                freq_sem_std.flatten(1),
+                freq_topk_abs.flatten(1),
+            ],
+            dim=-1,
+        )
+        h_raw_local_anomaly_profile = torch.cat(
+            [
+                time_sem_std.flatten(1),
+                time_topk_profile.flatten(1),
+                freq_sem_std.flatten(1),
+                freq_topk_profile.flatten(1),
+            ],
+            dim=-1,
+        )
 
         e_t_local_flat = (
             time_features_masked.permute(0, 1, 3, 2, 4)
@@ -517,6 +1285,11 @@ class Model(nn.Module):
         return {
             "h_raw_full": h_raw_full,
             "h_raw_struct_masked": h_raw_struct_masked,
+            "h_raw_global_feature": h_raw_global_feature,
+            "h_raw_semantic_stats": h_raw_semantic_stats,
+            "h_raw_semantic_coord_tokens": h_raw_semantic_coord_tokens,
+            "h_raw_local_anomaly_summary": h_raw_local_anomaly_summary,
+            "h_raw_local_anomaly_profile": h_raw_local_anomaly_profile,
             "time_features_masked": time_features_masked,
             "freq_features_masked": freq_features_masked,
             "time_global_features_masked": time_global_features_masked,
@@ -764,11 +1537,21 @@ class Model(nn.Module):
         self,
         x: torch.Tensor,
         file_ids_raw: Any,
+        sampling_pass: int = 0,
     ) -> Dict[str, Any]:
-        feature_tensors = self._extract_feature_tensors(x)
+        file_ids = self._to_tensor_ids(file_ids_raw, x.device)
+        feature_tensors = self._extract_feature_tensors(
+            x,
+            file_ids=file_ids,
+            sampling_pass=sampling_pass,
+        )
         h_raw_full = feature_tensors["h_raw_full"]
         h_raw_struct_masked = feature_tensors["h_raw_struct_masked"]
-        file_ids = self._to_tensor_ids(file_ids_raw, h_raw_full.device)
+        h_raw_global_feature = feature_tensors["h_raw_global_feature"]
+        h_raw_semantic_stats = feature_tensors["h_raw_semantic_stats"]
+        h_raw_semantic_coord_tokens = feature_tensors["h_raw_semantic_coord_tokens"]
+        h_raw_local_anomaly_summary = feature_tensors["h_raw_local_anomaly_summary"]
+        h_raw_local_anomaly_profile = feature_tensors["h_raw_local_anomaly_profile"]
         domains = self.get_domains(file_ids)
         head_key = self.resolve_head_key(file_ids)
 
@@ -818,7 +1601,16 @@ class Model(nn.Module):
         h_core = h_core_semantic + anomaly_focus * anomaly_residual
         h_core = F.layer_norm(h_core, (int(h_core.shape[-1]),))
         h_core = torch.nan_to_num(h_core)
-        h, h_residual = self._concept_with_residual(h_core, h_raw_full, h_raw_struct_masked)
+        h, h_residual, residual_details = self._concept_with_residual(
+            h_core,
+            h_raw_full,
+            h_raw_struct_masked,
+            h_raw_global_feature,
+            h_raw_semantic_stats,
+            h_raw_semantic_coord_tokens,
+            h_raw_local_anomaly_summary,
+            h_raw_local_anomaly_profile,
+        )
         h_transparent_raw = None
         h_transparent_time_raw = None
         h_transparent_freq_raw = None
@@ -887,6 +1679,11 @@ class Model(nn.Module):
             "prototype_evidence_weights": branch_proto_mix,
             "h_core": h_core,
             "h_residual": h_residual,
+            "residual_topk_indices": residual_details["topk_indices"],
+            "residual_topk_values": residual_details["topk_values"],
+            "residual_semantic_coord_attention": residual_details["semantic_coord_attention"],
+            "residual_ratio_scale": residual_details["residual_ratio_scale"],
+            "residual_alignment_gate": residual_details["residual_alignment_gate"],
             "h_transparent_raw": h_transparent_raw,
             "h_transparent_time_raw": h_transparent_time_raw,
             "h_transparent_freq_raw": h_transparent_freq_raw,
@@ -1170,9 +1967,14 @@ class Model(nn.Module):
         x: torch.Tensor,
         file_ids_raw: Any,
         labels: Optional[torch.Tensor],
+        sampling_pass: int = 0,
         update_enabled: Optional[bool] = None,
     ) -> Dict[str, Any]:
-        encoded = self._encode_structured(x=x, file_ids_raw=file_ids_raw)
+        encoded = self._encode_structured(
+            x=x,
+            file_ids_raw=file_ids_raw,
+            sampling_pass=sampling_pass,
+        )
         return self._attach_prototype_outputs(encoded, labels=labels, update_enabled=update_enabled)
 
     def _forward_structured_ensemble(
@@ -1180,11 +1982,16 @@ class Model(nn.Module):
         x: torch.Tensor,
         file_ids_raw: Any,
         labels: Optional[torch.Tensor],
+        sampling_pass: int = 0,
     ) -> Dict[str, Any]:
         sample_count = max(int(self.config.region_ensemble_samples), 1)
         encoded_outputs = [
-            self._encode_structured(x=x, file_ids_raw=file_ids_raw)
-            for _ in range(sample_count)
+            self._encode_structured(
+                x=x,
+                file_ids_raw=file_ids_raw,
+                sampling_pass=sampling_pass + sample_index,
+            )
+            for sample_index in range(sample_count)
         ]
         merged = self._merge_encoded_structured(encoded_outputs)
         return self._attach_prototype_outputs(
@@ -1198,10 +2005,21 @@ class Model(nn.Module):
         x: torch.Tensor,
         file_ids_raw: Any,
         labels: Optional[torch.Tensor],
+        sampling_pass: int = 0,
     ) -> Dict[str, Any]:
         if self._should_use_region_ensemble():
-            return self._forward_structured_ensemble(x=x, file_ids_raw=file_ids_raw, labels=labels)
-        return self._forward_structured(x=x, file_ids_raw=file_ids_raw, labels=labels)
+            return self._forward_structured_ensemble(
+                x=x,
+                file_ids_raw=file_ids_raw,
+                labels=labels,
+                sampling_pass=sampling_pass,
+            )
+        return self._forward_structured(
+            x=x,
+            file_ids_raw=file_ids_raw,
+            labels=labels,
+            sampling_pass=sampling_pass,
+        )
 
     def _forward_eval_mc(
         self,
@@ -1215,8 +2033,9 @@ class Model(nn.Module):
                 x=x,
                 file_ids_raw=file_ids_raw,
                 labels=labels,
+                sampling_pass=sample_index,
             )
-            for _ in range(sample_count)
+            for sample_index in range(sample_count)
         ]
         if sample_count == 1:
             return outputs[0]
