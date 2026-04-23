@@ -79,6 +79,7 @@ def pipeline(args):
     # 2. 多次迭代训练与测试
     # -----------------------
     all_results = []
+    base_seed = int(getattr(args_environment, "seed", 42))
     
     for it in range(args_environment.iterations):
         print(f"\n{'='*50}\n[INFO] 开始实验迭代 {it+1}/{args_environment.iterations}\n{'='*50}")
@@ -88,7 +89,13 @@ def pipeline(args):
         # 把name 加到args_trainer中
         args_trainer.logger_name = name
         # 设置随机种子
-        current_seed = args_environment.seed + it
+        current_seed = base_seed + it
+        args_environment.seed = current_seed
+        args_environment.current_seed = current_seed
+        args_data.seed = current_seed
+        args_model.seed = current_seed
+        args_task.seed = current_seed
+        args_trainer.seed = current_seed
         seed_everything(current_seed)
         print(f"[INFO] 设置随机种子: {current_seed}")
         init_lab(args_environment, args, name)

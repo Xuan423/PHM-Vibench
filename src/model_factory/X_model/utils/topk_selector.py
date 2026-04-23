@@ -1,7 +1,7 @@
 """Stability-based top-K selector for TSPN-CL.
 
-Scores each feature dimension by class separability vs. domain shift,
-tracks scores with EMA, and freezes the top-K indices after warmup.
+Scores each feature dimension by class separability vs. within-class
+dispersion, tracks scores with EMA, and freezes the top-K indices after warmup.
 
 Note: Selection returns indices. Models may apply indices as a mask (no reorder)
 or as a gather (reorder) depending on the chosen integration.
@@ -15,7 +15,7 @@ class StabilityTopKSelector:
     def __init__(
         self,
         top_k: int,
-        score_mode: str = "fisher_over_domain_var",
+        score_mode: str = "fisher_ratio",
         ema_momentum: float = 0.9,
         warmup_epochs: int = 1,
         eps: float = 1e-6,
@@ -31,7 +31,7 @@ class StabilityTopKSelector:
         self.frozen: bool = False
 
     def _compute_scores(
-        self, h_raw: torch.Tensor, labels: torch.Tensor, domains: torch.Tensor
+        self, h_raw: torch.Tensor, labels: torch.Tensor, domains: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """Compute per-dimension stability scores."""
         device = h_raw.device
@@ -50,19 +50,24 @@ class StabilityTopKSelector:
         class_sep = ((class_means - global_mean) ** 2) * weights.unsqueeze(1)
         class_sep = class_sep.sum(dim=0)  # [K]
 
-        # Domain shift: variance of domain means
-        uniq_domains = domains.unique()
-        domain_means = []
-        for d in uniq_domains:
-            dmask = domains == d
-            domain_means.append(h_raw[dmask].mean(dim=0))
-        domain_means = torch.stack(domain_means, dim=0)
-        domain_var = domain_means.var(dim=0, unbiased=False)  # [K]
+        # Within-class dispersion: weighted class-conditional variance.
+        class_var = []
+        for c in uniq_classes:
+            mask = labels == c
+            class_feats = h_raw[mask]
+            class_center = class_feats.mean(dim=0, keepdim=True)
+            class_var.append(((class_feats - class_center) ** 2).mean(dim=0))
+        class_var = torch.stack(class_var, dim=0)
+        within_class_var = (class_var * weights.unsqueeze(1)).sum(dim=0)
 
-        if self.score_mode == "fisher_over_domain_var":
-            score = class_sep / (domain_var + self.eps)
+        mode = str(self.score_mode)
+        if mode in {"fisher_ratio", "fisher_over_domain_var"}:
+            # Keep "fisher_over_domain_var" as a compatibility alias.
+            score = class_sep / (within_class_var + self.eps)
+        elif mode == "class_sep":
+            score = class_sep
         else:
-            score = class_sep / (domain_var + self.eps)
+            score = class_sep / (within_class_var + self.eps)
 
         if self.running_score is None or self.running_score.shape[0] != K:
             self.running_score = score.detach().to(device)
@@ -91,8 +96,8 @@ class StabilityTopKSelector:
         self,
         h_raw: torch.Tensor,
         labels: torch.Tensor,
-        domains: torch.Tensor,
-        epoch: int,
+        domains: Optional[torch.Tensor] = None,
+        epoch: int = 0,
     ) -> torch.Tensor:
         """Update scores and return Top-K indices (deterministic tie-break).
 

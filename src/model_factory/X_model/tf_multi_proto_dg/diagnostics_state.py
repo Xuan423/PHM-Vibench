@@ -63,15 +63,108 @@ class DiagnosticsState:
             "w_f": extras.get("w_f").detach().cpu() if torch.is_tensor(extras.get("w_f")) else None,
             "g_t": extras.get("g_t").detach().cpu() if torch.is_tensor(extras.get("g_t")) else None,
             "g_f": extras.get("g_f").detach().cpu() if torch.is_tensor(extras.get("g_f")) else None,
+            "g_t_local": (
+                extras.get("g_t_local").detach().cpu() if torch.is_tensor(extras.get("g_t_local")) else None
+            ),
+            "g_f_local": (
+                extras.get("g_f_local").detach().cpu() if torch.is_tensor(extras.get("g_f_local")) else None
+            ),
+            "g_t_global": (
+                extras.get("g_t_global").detach().cpu() if torch.is_tensor(extras.get("g_t_global")) else None
+            ),
+            "g_f_global": (
+                extras.get("g_f_global").detach().cpu() if torch.is_tensor(extras.get("g_f_global")) else None
+            ),
+            "time_focus": (
+                extras.get("time_focus").detach().cpu() if torch.is_tensor(extras.get("time_focus")) else None
+            ),
+            "freq_focus": (
+                extras.get("freq_focus").detach().cpu() if torch.is_tensor(extras.get("freq_focus")) else None
+            ),
+            "time_agreement": (
+                extras.get("time_agreement").detach().cpu()
+                if torch.is_tensor(extras.get("time_agreement"))
+                else None
+            ),
+            "freq_agreement": (
+                extras.get("freq_agreement").detach().cpu()
+                if torch.is_tensor(extras.get("freq_agreement"))
+                else None
+            ),
+            "time_trust_local": (
+                extras.get("time_trust_local").detach().cpu()
+                if torch.is_tensor(extras.get("time_trust_local"))
+                else None
+            ),
+            "freq_trust_local": (
+                extras.get("freq_trust_local").detach().cpu()
+                if torch.is_tensor(extras.get("freq_trust_local"))
+                else None
+            ),
+            "time_patch_starts": (
+                extras.get("time_patch_starts").detach().cpu()
+                if torch.is_tensor(extras.get("time_patch_starts"))
+                else None
+            ),
+            "freq_band_starts": (
+                extras.get("freq_band_starts").detach().cpu()
+                if torch.is_tensor(extras.get("freq_band_starts"))
+                else None
+            ),
+            "prototype_mix_weights": (
+                extras.get("prototype_mix_weights").detach().cpu()
+                if torch.is_tensor(extras.get("prototype_mix_weights"))
+                else None
+            ),
+            "prototype_evidence_weights": (
+                extras.get("prototype_evidence_weights").detach().cpu()
+                if torch.is_tensor(extras.get("prototype_evidence_weights"))
+                else None
+            ),
+            "prototype_confidence_weights": (
+                extras.get("prototype_confidence_weights").detach().cpu()
+                if torch.is_tensor(extras.get("prototype_confidence_weights"))
+                else None
+            ),
+            "prototype_agreement_weights": (
+                extras.get("prototype_agreement_weights").detach().cpu()
+                if torch.is_tensor(extras.get("prototype_agreement_weights"))
+                else None
+            ),
+            "prototype_reliability_weights": (
+                extras.get("prototype_reliability_weights").detach().cpu()
+                if torch.is_tensor(extras.get("prototype_reliability_weights"))
+                else None
+            ),
+            "prototype_head_logit_scales": (
+                extras.get("prototype_head_logit_scales").detach().cpu()
+                if torch.is_tensor(extras.get("prototype_head_logit_scales"))
+                else None
+            ),
             "h": extras.get("h").detach().cpu() if torch.is_tensor(extras.get("h")) else None,
             "proto_scores": (
                 extras.get("proto_scores").detach().cpu()
                 if torch.is_tensor(extras.get("proto_scores"))
                 else None
             ),
+            "proto_routing_scores": (
+                extras.get("proto_routing_scores").detach().cpu()
+                if torch.is_tensor(extras.get("proto_routing_scores"))
+                else None
+            ),
+            "anchor_scores": (
+                extras.get("anchor_scores").detach().cpu()
+                if torch.is_tensor(extras.get("anchor_scores"))
+                else None
+            ),
             "target_proto_probs": (
                 extras.get("target_proto_probs").detach().cpu()
                 if torch.is_tensor(extras.get("target_proto_probs"))
+                else None
+            ),
+            "target_proto_routing_scores": (
+                extras.get("target_proto_routing_scores").detach().cpu()
+                if torch.is_tensor(extras.get("target_proto_routing_scores"))
                 else None
             ),
             "proto_positive_scores": (
@@ -155,6 +248,24 @@ class DiagnosticsState:
         w_f = self._concat(stage, "w_f")
         g_t = self._concat(stage, "g_t")
         g_f = self._concat(stage, "g_f")
+        g_t_local = self._concat(stage, "g_t_local")
+        g_f_local = self._concat(stage, "g_f_local")
+        g_t_global = self._concat(stage, "g_t_global")
+        g_f_global = self._concat(stage, "g_f_global")
+        time_focus = self._concat(stage, "time_focus")
+        freq_focus = self._concat(stage, "freq_focus")
+        time_agreement = self._concat(stage, "time_agreement")
+        freq_agreement = self._concat(stage, "freq_agreement")
+        time_trust_local = self._concat(stage, "time_trust_local")
+        freq_trust_local = self._concat(stage, "freq_trust_local")
+        time_patch_starts = self._concat(stage, "time_patch_starts")
+        freq_band_starts = self._concat(stage, "freq_band_starts")
+        prototype_mix_weights = self._concat(stage, "prototype_mix_weights")
+        prototype_evidence_weights = self._concat(stage, "prototype_evidence_weights")
+        prototype_confidence_weights = self._concat(stage, "prototype_confidence_weights")
+        prototype_agreement_weights = self._concat(stage, "prototype_agreement_weights")
+        prototype_reliability_weights = self._concat(stage, "prototype_reliability_weights")
+        prototype_head_logit_scales = self._concat(stage, "prototype_head_logit_scales")
         h = self._concat(stage, "h")
         a_t = next((item["A_t"] for item in self._stage_records.get(stage, []) if torch.is_tensor(item["A_t"])), None)
         a_f = next((item["A_f"] for item in self._stage_records.get(stage, []) if torch.is_tensor(item["A_f"])), None)
@@ -179,6 +290,54 @@ class DiagnosticsState:
             ),
             "patch_band_similarity": build_patch_band_report(file_ids, s, w_t, w_f),
             "compact_concept_report": build_compact_concept_report(file_ids, h, g_t, g_f, self.role_dim),
+            "hierarchical_evidence_report": {
+                "time_focus": time_focus.tolist() if time_focus is not None else None,
+                "freq_focus": freq_focus.tolist() if freq_focus is not None else None,
+                "time_agreement": time_agreement.tolist() if time_agreement is not None else None,
+                "freq_agreement": freq_agreement.tolist() if freq_agreement is not None else None,
+                "time_trust_local": (
+                    time_trust_local.tolist() if time_trust_local is not None else None
+                ),
+                "freq_trust_local": (
+                    freq_trust_local.tolist() if freq_trust_local is not None else None
+                ),
+                "g_t_local": g_t_local.tolist() if g_t_local is not None else None,
+                "g_f_local": g_f_local.tolist() if g_f_local is not None else None,
+                "g_t_global": g_t_global.tolist() if g_t_global is not None else None,
+                "g_f_global": g_f_global.tolist() if g_f_global is not None else None,
+                "time_patch_starts": (
+                    time_patch_starts.tolist() if time_patch_starts is not None else None
+                ),
+                "freq_band_starts": (
+                    freq_band_starts.tolist() if freq_band_starts is not None else None
+                ),
+                "prototype_mix_weights": (
+                    prototype_mix_weights.tolist() if prototype_mix_weights is not None else None
+                ),
+                "prototype_evidence_weights": (
+                    prototype_evidence_weights.tolist() if prototype_evidence_weights is not None else None
+                ),
+                "prototype_confidence_weights": (
+                    prototype_confidence_weights.tolist()
+                    if prototype_confidence_weights is not None
+                    else None
+                ),
+                "prototype_agreement_weights": (
+                    prototype_agreement_weights.tolist()
+                    if prototype_agreement_weights is not None
+                    else None
+                ),
+                "prototype_reliability_weights": (
+                    prototype_reliability_weights.tolist()
+                    if prototype_reliability_weights is not None
+                    else None
+                ),
+                "prototype_head_logit_scales": (
+                    prototype_head_logit_scales.tolist()
+                    if prototype_head_logit_scales is not None
+                    else None
+                ),
+            },
             "prototype_cards": self._prototype_cards(stage, prototype_head) if prototype_head is not None else None,
             "prototype_health": prototype_health,
         }

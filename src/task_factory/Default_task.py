@@ -58,6 +58,7 @@ class Default_task(pl.LightningModule):
         self.metadata = metadata # 存储 metadata
         self.args_trainer = args_trainer
         self.args_environment = args_environment
+        self.enable_domain_logging = bool(getattr(self.args_task, "enable_domain_logging", False))
 
         # 使用组件配置损失和指标
         self.loss_fn = get_loss_fn(
@@ -144,10 +145,21 @@ class Default_task(pl.LightningModule):
             # Convert tensor-based ID to a Python int for indexing metadata (legacy path)
             file_id = batch['file_id'][0].item()
             data_name = self.metadata[file_id]['Name']# .values
+            domain_key = None
+            if self.enable_domain_logging:
+                domain_id = self.metadata[file_id].get('Domain_id', None)
+                try:
+                    domain_key = str(int(domain_id))
+                except Exception:
+                    domain_key = str(domain_id) if domain_id is not None else "unknown"
             # dataset_id = self.metadata[file_id]['Dataset_id'].item() 
             batch.update({'file_id': file_id})
         except (ValueError, TypeError) as e:
             raise ValueError(f" Error: {e}")
+
+        if hasattr(self.network, "runtime_epoch"):
+            self.network.runtime_epoch = int(getattr(self, "current_epoch", 0))
+            self.network.runtime_total_epochs = getattr(self.args_trainer, "num_epochs", None)
 
         # 1. 前向传播
         y_hat = self.forward(batch)
@@ -237,6 +249,9 @@ class Default_task(pl.LightningModule):
         # 6. 计算总损失
         total_loss = loss + reg_dict.get('total', torch.tensor(0.0, device=loss.device))
         step_metrics[f"{stage}_total_loss"] = total_loss
+        if self.enable_domain_logging and domain_key is not None:
+            # Optional DG diagnostics: domain-wise total loss.
+            step_metrics[f"{stage}_domain_{domain_key}_total_loss"] = total_loss
 
         # 添加 batch size 用于日志记录
         # step_metrics[f"{stage}_batch_size"] = torch.tensor(x.shape[0], dtype=torch.float, device=loss.device)
@@ -252,12 +267,71 @@ class Default_task(pl.LightningModule):
         # 返回用于反向传播的总损失
         return metrics["train_total_loss"]
 
+    def on_after_backward(self) -> None:
+        """Sanitize non-finite gradients to avoid silently corrupting model parameters."""
+        non_finite_tensors = 0
+        for param in self.parameters():
+            grad = param.grad
+            if grad is None or not torch.is_floating_point(grad):
+                continue
+            if not torch.isfinite(grad).all():
+                grad.copy_(torch.nan_to_num(grad, nan=0.0, posinf=1e3, neginf=-1e3))
+                non_finite_tensors += 1
+        if non_finite_tensors > 0:
+            self.log(
+                "train_nonfinite_grad_tensors",
+                torch.tensor(float(non_finite_tensors), device=self.device),
+                on_step=True,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=True,
+            )
+
     def validation_step(self, batch: dict, *args, **kwargs) -> None:
         """验证步骤"""
         metrics = self._shared_step(batch, "val")
       
         self._log_metrics(metrics, "val")
         # validation_step 通常不返回损失
+
+    def on_validation_epoch_end(self) -> None:
+        """Log worst-domain validation total loss for DG-aware checkpointing."""
+        if not self.enable_domain_logging:
+            return
+        callback_metrics = getattr(self.trainer, "callback_metrics", {})
+        domain_values = []
+        for key, value in callback_metrics.items():
+            key_str = str(key)
+            if not key_str.startswith("val_domain_") or not key_str.endswith("_total_loss"):
+                continue
+            if torch.is_tensor(value):
+                domain_values.append(value.detach().float().to(self.device))
+            else:
+                domain_values.append(torch.tensor(float(value), device=self.device))
+        if not domain_values:
+            return
+        domain_stack = torch.stack(domain_values)
+        worst_domain_loss = domain_stack.max()
+        mean_domain_loss = domain_stack.mean()
+        self.log(
+            "val_total_loss_worst_domain",
+            worst_domain_loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+            sync_dist=True,
+        )
+        self.log(
+            "val_total_loss_domain_gap",
+            worst_domain_loss - mean_domain_loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+            sync_dist=True,
+        )
 
     def test_step(self, batch: dict, *args, **kwargs) -> None:
         """测试步骤"""

@@ -171,9 +171,10 @@ class SignalProcessingLayer(nn.Module):
         normed_x = self.norm(x)
         normed_x = rearrange(normed_x, 'b c l -> b l c')
         # 通过线性层
-        
-        self.weight_connection.weight.data = F.softmax((1.0 / self.temperature) *
-                                                       self.weight_connection.weight.data, dim=0)
+        self.weight_connection.weight.data = F.softmax(
+            (1.0 / self.temperature) * self.weight_connection.weight.data,
+            dim=0,
+        )
         x = self.weight_connection(normed_x)
 
         # 按模块数拆分

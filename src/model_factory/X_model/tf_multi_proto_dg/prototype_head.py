@@ -24,6 +24,8 @@ class PrototypeHead(nn.Module):
         adaptive_effective_k_min: int = 1,
         adaptive_effective_k_penalty: float = 8.0,
         assignment_temperature: float = 0.07,
+        assignment_mode: str = "hard",
+        balance_weight: float = 0.0,
         logit_scale_init: float = 12.0,
     ) -> None:
         super().__init__()
@@ -40,6 +42,13 @@ class PrototypeHead(nn.Module):
         self.adaptive_effective_k_min = int(adaptive_effective_k_min)
         self.adaptive_effective_k_penalty = float(adaptive_effective_k_penalty)
         self.assignment_temperature = float(assignment_temperature)
+        self.assignment_mode = str(assignment_mode)
+        if self.assignment_mode not in {"hard", "soft_similarity", "soft_balanced"}:
+            raise ValueError(
+                f"Unsupported assignment_mode={self.assignment_mode!r}. "
+                "Expected one of {'hard', 'soft_similarity', 'soft_balanced'}."
+            )
+        self.balance_weight = float(balance_weight)
         self.logit_scale_init = float(logit_scale_init)
         self.head_to_num_classes = (
             {str(key): int(value) for key, value in num_classes.items()}
@@ -182,9 +191,20 @@ class PrototypeHead(nn.Module):
         assign_tau = max(float(self.assignment_temperature), 1e-6)
         h_norm = F.normalize(h, dim=-1)
         proto_norm = F.normalize(prototypes, dim=-1)
+        class_anchor = F.normalize(proto_norm.mean(dim=1), dim=-1)
+        anchor_scores_raw = torch.einsum("bd,nd->bn", h_norm, class_anchor)
         proto_scores_raw = torch.einsum("bd,nkd->bnk", h_norm, proto_norm)
+        proto_residual_scores_raw = proto_scores_raw - anchor_scores_raw.unsqueeze(-1)
+        if self.num_prototypes_per_class > 1:
+            proto_routing_mean = proto_residual_scores_raw.mean(dim=-1, keepdim=True)
+            proto_routing_centered = proto_residual_scores_raw - proto_routing_mean
+            proto_routing_scale = proto_routing_centered.pow(2).mean(dim=-1, keepdim=True).add(1e-6).sqrt()
+            proto_routing_scores = proto_routing_centered / proto_routing_scale
+        else:
+            proto_routing_scores = torch.zeros_like(proto_residual_scores_raw)
         logit_scale = F.softplus(logit_scale_raw) + 1e-4
-        proto_scores = logit_scale * proto_scores_raw
+        anchor_scores = logit_scale * anchor_scores_raw
+        proto_scores = logit_scale * proto_residual_scores_raw
         class_effective_k_bias, class_effective_k = self._class_effective_k_bias(
             head_key,
             h.device,
@@ -194,13 +214,20 @@ class PrototypeHead(nn.Module):
         class_neff = self._class_neff(head_key, h.device, proto_scores.dtype)
         class_temperatures = self._class_temperatures(head_key, h.device, proto_scores.dtype)
         if self.class_pool_mode == "max":
-            pooled_scores = proto_scores_logits.max(dim=-1).values
+            pooled_residual = proto_scores_logits.max(dim=-1).values
         else:
-            pooled_scores = class_temperatures.view(1, -1) * torch.logsumexp(
+            pooled_residual = class_temperatures.view(1, -1) * torch.logsumexp(
                 proto_scores_logits / class_temperatures.view(1, -1, 1),
                 dim=-1,
             )
-        logits = pooled_scores + class_bias.view(1, -1)
+            pooled_residual = pooled_residual - class_temperatures.view(1, -1) * torch.log(
+                torch.tensor(
+                    float(max(self.num_prototypes_per_class, 1)),
+                    device=proto_scores.device,
+                    dtype=proto_scores.dtype,
+                )
+            )
+        logits = anchor_scores + pooled_residual + class_bias.view(1, -1)
 
         if labels is None:
             target_class_ids = logits.argmax(dim=1)
@@ -209,11 +236,39 @@ class PrototypeHead(nn.Module):
 
         gather_index = target_class_ids.view(-1, 1, 1).expand(-1, 1, self.num_prototypes_per_class)
         target_proto_scores = proto_scores.gather(1, gather_index).squeeze(1)
+        target_proto_scores_raw = proto_residual_scores_raw.gather(1, gather_index).squeeze(1)
+        target_proto_routing_scores = proto_routing_scores.gather(1, gather_index).squeeze(1)
+        target_anchor_scores = anchor_scores.gather(1, target_class_ids.view(-1, 1)).squeeze(1)
         if assignment_enabled:
-            target_proto_scores_routed = target_proto_scores
-            target_proto_probs = torch.softmax(target_proto_scores_routed / assign_tau, dim=-1)
-            prototype_assignments = target_proto_probs.argmax(dim=-1)
-            winning_proto_scores = target_proto_scores.gather(
+            if self.assignment_mode == "soft_similarity":
+                target_proto_scores_routed = target_proto_scores_raw
+            else:
+                target_proto_scores_routed = target_proto_routing_scores
+
+            if self.assignment_mode == "soft_balanced" and self.balance_weight > 0.0:
+                _, _, _, counts, _, _ = self._get_buffers(head_key)
+                class_counts = counts.detach().to(
+                    device=target_proto_scores_routed.device,
+                    dtype=target_proto_scores_routed.dtype,
+                )
+                target_class_counts = class_counts.index_select(0, target_class_ids)
+                target_class_usage = target_class_counts / target_class_counts.sum(
+                    dim=-1, keepdim=True
+                ).clamp_min(1e-6)
+                usage_penalty = -target_class_usage.clamp_min(1e-6).log()
+                usage_penalty = usage_penalty - usage_penalty.mean(dim=-1, keepdim=True)
+                target_proto_scores_routed = target_proto_scores_routed + self.balance_weight * usage_penalty
+
+            if self.assignment_mode == "hard":
+                prototype_assignments = target_proto_scores_routed.argmax(dim=-1)
+                target_proto_probs = F.one_hot(
+                    prototype_assignments,
+                    num_classes=self.num_prototypes_per_class,
+                ).to(target_proto_scores_routed.dtype)
+            else:
+                target_proto_probs = torch.softmax(target_proto_scores_routed / assign_tau, dim=-1)
+                prototype_assignments = target_proto_probs.argmax(dim=-1)
+            winning_proto_scores = target_proto_scores_raw.gather(
                 1, prototype_assignments.view(-1, 1)
             ).squeeze(1)
             if update_enabled:
@@ -225,9 +280,15 @@ class PrototypeHead(nn.Module):
             winning_proto_scores = None
         return {
             "logits": logits,
+            "anchor_scores": anchor_scores,
+            "anchor_scores_raw": anchor_scores_raw,
+            "class_anchor": class_anchor,
             "proto_scores": proto_scores,
             "proto_scores_logits": proto_scores_logits,
             "proto_scores_raw": proto_scores_raw,
+            "proto_residual_scores_raw": proto_residual_scores_raw,
+            "proto_routing_scores": proto_routing_scores,
+            "pooled_residual_scores": pooled_residual,
             "target_class_ids": target_class_ids,
             "class_neff": class_neff,
             "target_class_neff": class_neff.gather(0, target_class_ids),
@@ -237,7 +298,10 @@ class PrototypeHead(nn.Module):
             "class_effective_k": class_effective_k,
             "target_class_effective_k": class_effective_k.gather(0, target_class_ids),
             "target_proto_scores": target_proto_scores,
+            "target_proto_scores_raw": target_proto_scores_raw,
+            "target_proto_routing_scores": target_proto_routing_scores,
             "target_proto_scores_routed": target_proto_scores_routed,
+            "target_anchor_scores": target_anchor_scores,
             "target_proto_probs": target_proto_probs,
             "prototype_assignments": prototype_assignments,
             "prototype_assignment_weights": target_proto_probs,
@@ -298,7 +362,7 @@ class PrototypeHead(nn.Module):
             prototypes.dtype,
         )
         return {
-            "assignment_mode": "lsep_simplified",
+            "assignment_mode": self.assignment_mode,
             "num_classes": int(prototypes.shape[0]),
             "M": int(prototypes.shape[1]),
             "initialized": initialized.detach().cpu().int().tolist(),

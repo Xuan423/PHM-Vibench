@@ -15,19 +15,19 @@ environment:
   seed: 42
   iterations: 5
   output_dir: "results/demo/tf_multi_proto_dg_sys27_sys21_family"
-  notes: "Canonical TF_MultiProtoDG family for target_system_id 27/21 with domain-aligned multi-prototype defaults."
+  notes: "TF_MultiProtoDG v10-mainline clean chain: deep-global pair + anomaly-local residual + joint prototype contrastive."
 
 data:
   batch_size: 64
-  num_workers: 4
+  num_workers: 2
 
 task:
   target_system_id: [27]
-  source_domain_id: [1,2]
-  target_domain_id: [0]
+  source_domain_id: [0,2]
+  target_domain_id: [2]
   label_smoothing: 0.05
   lr: 0.001
-  weight_decay: 0.001
+  weight_decay: 0.0005
 
 model:
   name: "TF_MultiProtoDG"
@@ -38,23 +38,38 @@ model:
   freq_operators: ["IdentitySpectrum", "LogSpectrum", "SpectralWhitening", "GaussianBandMask"]
   time_indicators: ["Mean", "Std", "RMS", "Kurtosis", "CrestFactor", "Entropy"]
   freq_indicators: ["BandEnergy", "BandRMS", "SpectralEntropy", "PeakRatio"]
-  time_patch_count: 8
-  freq_band_count: 8
+  time_patch_count: 64
+  time_patch_mode: "random"
+  time_patch_width: 512
+  freq_band_count: 64
+  freq_band_mode: "random"
+  freq_band_width: 256
   padding_mode: "zero_right"
+  transparent_backbone_enabled: true
+  transparent_backbone_weight: 1.0
+  transparent_backbone_layers: 4
+  transparent_backbone_modules: ["WF", "HT", "I"]
+  transparent_backbone_features: ["Mean", "Std", "Entropy", "RMS", "Kurtosis", "CrestFactor", "AbsMean", "Skewness", "ClearanceFactor", "ShapeFactor"]
+  transparent_backbone_out_channels: 3
+  transparent_backbone_scale: 4
+  transparent_backbone_skip_connection: true
   role_dim: 16
+  concept_dim: 64
   num_prototypes_per_class: 3
   prototype_temperature: 0.12
   prototype_assignment_temperature: 0.12
-  proto_contrastive_temperature: 0.3
+  prototype_class_pool_mode: "logsumexp"
+  proto_contrastive_temperature: 0.2
   proto_contrastive_positive_mode: "assigned"
-  proto_contrastive_weight: 0.08
-  proto_contrastive_neg_topk: 0
-  adaptive_proto_enabled: true
-  adaptive_effective_k_enabled: false
-  adaptive_effective_k_ready_count: 8.0
-  adaptive_effective_k_min: 1
-  adaptive_effective_k_penalty: 6.0
+  use_contrastive_head: true
+  proto_contrastive_weight: 0.03
+  adaptive_proto_enabled: false
+  adaptive_proto_min_scale: 0.3
+  adaptive_proto_max_scale: 1.0
   contrastive_warmup_epochs: 0
+  prototype:
+    assignment_mode: "soft_balanced"
+    balance_weight: 0.05
   channel_fusion_norm: "layernorm"
   role_nonneg: "none"
   role_input_norm: "layernorm"
@@ -66,21 +81,20 @@ model:
   cross_self_score_mode: "absmean"
   concept_norm: "layernorm"
   prototype_logit_scale_init: 6.0
-  prototype_diversity_weight: 0.005
-  prototype_occupancy_weight: 0.005
-  use_contrastive_head: true
+  cooperative_prototypes_enabled: false
+  swa_enabled: false
   export_diagnostics: false
-  prototype_class_pool_mode: "logsumexp"
   prototype_card_top_t: 8
   diagnostics_max_members: 32
   classifier:
     residual_input: "raw_feature"
-    residual_weight: 0.18
+    residual_weight: 0.05
     scale: 1.0
 
 trainer:
   gpus: 1
   device: "cuda"
+  monitor: "val_total_loss"
   num_epochs: 100
   patience: 50
   save_last: false

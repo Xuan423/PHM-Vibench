@@ -172,7 +172,7 @@ class ClassifierConfig:
 
 @dataclass(frozen=True)
 class PrototypeRoutingConfig:
-    assignment_mode: str = "hard"
+    assignment_mode: str = "soft_balanced"
     assign_tau: float = 0.2
     balance_weight: float = 0.0
     update_mode: str = "learnable"
@@ -199,7 +199,33 @@ class TFMultiProtoDGConfig:
     time_indicators: List[str] = field(default_factory=list)
     freq_indicators: List[str] = field(default_factory=list)
     time_patch_count: int = 8
+    time_patch_mode: str = "uniform"
+    time_patch_width: int | None = None
     freq_band_count: int = 8
+    freq_band_mode: str = "uniform"
+    freq_band_width: int | None = None
+    transparent_backbone_enabled: bool = False
+    transparent_backbone_weight: float = 0.0
+    transparent_backbone_layers: int = 2
+    transparent_backbone_modules: List[str] = field(default_factory=list)
+    transparent_backbone_features: List[str] = field(default_factory=list)
+    transparent_backbone_out_channels: int = 3
+    transparent_backbone_scale: int = 4
+    transparent_backbone_skip_connection: bool = True
+    region_ensemble_samples: int = 1
+    stability_consistency_weight: float = 0.0
+    eval_mc_samples: int = 1
+    cooperative_prototypes_enabled: bool = False
+    cooperative_time_prior: float = 0.25
+    cooperative_freq_prior: float = 0.25
+    cooperative_joint_prior: float = 0.5
+    cooperative_weight_floor: float = 0.15
+    cooperative_max_share: float = 0.65
+    cooperative_evidence_mix: float = 0.5
+    cooperative_confidence_mix: float = 0.15
+    cooperative_agreement_mix: float = 0.35
+    cooperative_logit_scale_min: float = 1.0
+    cooperative_consensus_weight: float = 0.0
     padding_mode: str = "error"
     use_topk_selector: bool = False
     top_k_features: int | None = None
@@ -438,12 +464,12 @@ def build_model_config(args_model: Any, metadata: Any) -> TFMultiProtoDGConfig:
     role_dim = _coerce_positive_int(
         getattr(args_model, "role_dim", None),
         "model.role_dim",
-        default=max(1, int(concept_dim_arg or 64) // 4),
+        default=max(1, int(concept_dim_arg or 64) // 2),
     )
-    concept_dim = int(concept_dim_arg) if concept_dim_arg is not None else 4 * role_dim
-    if concept_dim != 4 * role_dim:
+    concept_dim = int(concept_dim_arg) if concept_dim_arg is not None else 2 * role_dim
+    if concept_dim not in {2 * role_dim, 4 * role_dim}:
         raise ValueError(
-            f"model.concept_dim must equal 4 * model.role_dim for the simplified path, got "
+            f"model.concept_dim must equal 2 * model.role_dim or 4 * model.role_dim, got "
             f"concept_dim={concept_dim}, role_dim={role_dim}."
         )
 
@@ -648,7 +674,7 @@ def build_model_config(args_model: Any, metadata: Any) -> TFMultiProtoDGConfig:
             _namespace_get(
                 prototype_raw,
                 "assignment_mode",
-                getattr(args_model, "prototype_assignment_mode", "hard"),
+                getattr(args_model, "prototype_assignment_mode", "soft_balanced"),
             )
         ),
         "model.prototype.assignment_mode",
@@ -813,6 +839,186 @@ def build_model_config(args_model: Any, metadata: Any) -> TFMultiProtoDGConfig:
             ),
         )
     )
+    time_patch_mode = _validate_choice(
+        str(getattr(args_model, "time_patch_mode", "uniform")),
+        "model.time_patch_mode",
+        {"uniform", "random", "random_stratified"},
+    )
+    time_patch_width_raw = getattr(args_model, "time_patch_width", None)
+    time_patch_width = None
+    if time_patch_width_raw is not None:
+        time_patch_width = _coerce_positive_int(
+            time_patch_width_raw,
+            "model.time_patch_width",
+        )
+    if time_patch_width is not None and time_patch_mode not in {"random", "random_stratified"}:
+        raise ValueError(
+            "model.time_patch_width requires model.time_patch_mode in {'random', 'random_stratified'}."
+        )
+    padding_mode = str(getattr(args_model, "padding_mode", "error"))
+    if (
+        time_patch_mode in {"random", "random_stratified"}
+        and time_patch_width is not None
+        and time_patch_width > input_length
+        and padding_mode == "error"
+    ):
+        raise ValueError(
+            "model.time_patch_width cannot exceed model.input_length when model.padding_mode='error'."
+        )
+    freq_bins = input_length // 2 + 1
+    freq_band_mode = _validate_choice(
+        str(getattr(args_model, "freq_band_mode", "uniform")),
+        "model.freq_band_mode",
+        {"uniform", "random", "random_stratified"},
+    )
+    freq_band_width_raw = getattr(args_model, "freq_band_width", None)
+    freq_band_width = None
+    if freq_band_width_raw is not None:
+        freq_band_width = _coerce_positive_int(
+            freq_band_width_raw,
+            "model.freq_band_width",
+        )
+    if freq_band_width is not None and freq_band_mode not in {"random", "random_stratified"}:
+        raise ValueError(
+            "model.freq_band_width requires model.freq_band_mode in {'random', 'random_stratified'}."
+        )
+    if (
+        freq_band_mode in {"random", "random_stratified"}
+        and freq_band_width is not None
+        and freq_band_width > freq_bins
+        and padding_mode == "error"
+    ):
+        raise ValueError(
+            "model.freq_band_width cannot exceed frequency bins when model.padding_mode='error'."
+        )
+    transparent_backbone_enabled = bool(getattr(args_model, "transparent_backbone_enabled", False))
+    transparent_backbone_weight = _coerce_non_negative_float(
+        getattr(args_model, "transparent_backbone_weight", 0.0),
+        "model.transparent_backbone_weight",
+        0.0,
+    )
+    transparent_backbone_layers = _coerce_non_negative_int(
+        getattr(args_model, "transparent_backbone_layers", 2),
+        "model.transparent_backbone_layers",
+        2,
+    )
+    transparent_backbone_modules = _as_list(
+        getattr(args_model, "transparent_backbone_modules", None),
+        ["WF", "HT", "I"],
+    )
+    transparent_backbone_features = _as_list(
+        getattr(args_model, "transparent_backbone_features", None),
+        ["Mean", "Std", "Entropy", "RMS", "Kurtosis", "CrestFactor"],
+    )
+    transparent_backbone_out_channels = _coerce_positive_int(
+        getattr(args_model, "transparent_backbone_out_channels", 3),
+        "model.transparent_backbone_out_channels",
+        3,
+    )
+    transparent_backbone_scale = _coerce_positive_int(
+        getattr(args_model, "transparent_backbone_scale", 4),
+        "model.transparent_backbone_scale",
+        4,
+    )
+    transparent_backbone_skip_connection = bool(
+        getattr(args_model, "transparent_backbone_skip_connection", True)
+    )
+    region_ensemble_samples = _coerce_positive_int(
+        getattr(args_model, "region_ensemble_samples", 1),
+        "model.region_ensemble_samples",
+        1,
+    )
+    stability_consistency_weight = _coerce_non_negative_float(
+        getattr(args_model, "stability_consistency_weight", 0.0),
+        "model.stability_consistency_weight",
+        0.0,
+    )
+    eval_mc_samples = _coerce_positive_int(
+        getattr(args_model, "eval_mc_samples", 1),
+        "model.eval_mc_samples",
+        1,
+    )
+    cooperative_prototypes_enabled = bool(
+        getattr(args_model, "cooperative_prototypes_enabled", False)
+    )
+    cooperative_time_prior = _coerce_non_negative_float(
+        getattr(args_model, "cooperative_time_prior", 0.25),
+        "model.cooperative_time_prior",
+        0.25,
+    )
+    cooperative_freq_prior = _coerce_non_negative_float(
+        getattr(args_model, "cooperative_freq_prior", 0.25),
+        "model.cooperative_freq_prior",
+        0.25,
+    )
+    cooperative_joint_prior = _coerce_non_negative_float(
+        getattr(args_model, "cooperative_joint_prior", 0.5),
+        "model.cooperative_joint_prior",
+        0.5,
+    )
+    if cooperative_time_prior + cooperative_freq_prior + cooperative_joint_prior <= 0.0:
+        raise ValueError(
+            "model cooperative prototype priors must sum to a positive value."
+        )
+    cooperative_weight_floor = _coerce_non_negative_float(
+        getattr(args_model, "cooperative_weight_floor", 0.15),
+        "model.cooperative_weight_floor",
+        0.15,
+    )
+    if not 0.0 <= cooperative_weight_floor < 1.0:
+        raise ValueError(
+            f"model.cooperative_weight_floor must be in [0, 1), got {cooperative_weight_floor}."
+        )
+    cooperative_max_share = _coerce_non_negative_float(
+        getattr(args_model, "cooperative_max_share", 0.65),
+        "model.cooperative_max_share",
+        0.65,
+    )
+    if not 0.34 <= cooperative_max_share <= 1.0:
+        raise ValueError(
+            f"model.cooperative_max_share must be in [0.34, 1], got {cooperative_max_share}."
+        )
+    cooperative_evidence_mix = _coerce_non_negative_float(
+        getattr(args_model, "cooperative_evidence_mix", 0.5),
+        "model.cooperative_evidence_mix",
+        0.5,
+    )
+    cooperative_confidence_mix = _coerce_non_negative_float(
+        getattr(args_model, "cooperative_confidence_mix", 0.15),
+        "model.cooperative_confidence_mix",
+        0.15,
+    )
+    cooperative_agreement_mix = _coerce_non_negative_float(
+        getattr(args_model, "cooperative_agreement_mix", 0.35),
+        "model.cooperative_agreement_mix",
+        0.35,
+    )
+    if cooperative_evidence_mix + cooperative_confidence_mix + cooperative_agreement_mix <= 0.0:
+        raise ValueError(
+            "model cooperative fusion mixes must sum to a positive value."
+        )
+    cooperative_logit_scale_min = _coerce_non_negative_float(
+        getattr(args_model, "cooperative_logit_scale_min", 1.0),
+        "model.cooperative_logit_scale_min",
+        1.0,
+    )
+    if not 0.0 < cooperative_logit_scale_min <= 1.0:
+        raise ValueError(
+            f"model.cooperative_logit_scale_min must be in (0, 1], got {cooperative_logit_scale_min}."
+        )
+    cooperative_consensus_weight = _coerce_non_negative_float(
+        getattr(args_model, "cooperative_consensus_weight", 0.0),
+        "model.cooperative_consensus_weight",
+        0.0,
+    )
+    if transparent_backbone_weight > 0.0 and not transparent_backbone_enabled:
+        raise ValueError(
+            "model.transparent_backbone_weight requires model.transparent_backbone_enabled=true."
+        )
+    if transparent_backbone_enabled and transparent_backbone_layers <= 0:
+        raise ValueError(
+            "model.transparent_backbone_layers must be positive when the transparent backbone is enabled."
+        )
 
     config = TFMultiProtoDGConfig(
         name=str(getattr(args_model, "name", "TF_MultiProtoDG")),
@@ -830,12 +1036,38 @@ def build_model_config(args_model: Any, metadata: Any) -> TFMultiProtoDGConfig:
             "model.time_patch_count",
             8,
         ),
+        time_patch_mode=time_patch_mode,
+        time_patch_width=time_patch_width,
         freq_band_count=_coerce_positive_int(
             getattr(args_model, "freq_band_count", 8),
             "model.freq_band_count",
             8,
         ),
-        padding_mode=str(getattr(args_model, "padding_mode", "error")),
+        freq_band_mode=freq_band_mode,
+        freq_band_width=freq_band_width,
+        transparent_backbone_enabled=transparent_backbone_enabled,
+        transparent_backbone_weight=transparent_backbone_weight,
+        transparent_backbone_layers=transparent_backbone_layers,
+        transparent_backbone_modules=transparent_backbone_modules,
+        transparent_backbone_features=transparent_backbone_features,
+        transparent_backbone_out_channels=transparent_backbone_out_channels,
+        transparent_backbone_scale=transparent_backbone_scale,
+        transparent_backbone_skip_connection=transparent_backbone_skip_connection,
+        region_ensemble_samples=region_ensemble_samples,
+        stability_consistency_weight=stability_consistency_weight,
+        eval_mc_samples=eval_mc_samples,
+        cooperative_prototypes_enabled=cooperative_prototypes_enabled,
+        cooperative_time_prior=cooperative_time_prior,
+        cooperative_freq_prior=cooperative_freq_prior,
+        cooperative_joint_prior=cooperative_joint_prior,
+        cooperative_weight_floor=cooperative_weight_floor,
+        cooperative_max_share=cooperative_max_share,
+        cooperative_evidence_mix=cooperative_evidence_mix,
+        cooperative_confidence_mix=cooperative_confidence_mix,
+        cooperative_agreement_mix=cooperative_agreement_mix,
+        cooperative_logit_scale_min=cooperative_logit_scale_min,
+        cooperative_consensus_weight=cooperative_consensus_weight,
+        padding_mode=padding_mode,
         use_topk_selector=bool(getattr(args_model, "use_topk_selector", False)),
         top_k_features=getattr(args_model, "top_k_features", None),
         topk_score_mode=str(getattr(args_model, "topk_score_mode", "fisher_over_domain_var")),

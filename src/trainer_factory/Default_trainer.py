@@ -1,6 +1,11 @@
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger, CSVLogger
-from pytorch_lightning.callbacks import ModelCheckpoint, ModelPruning, EarlyStopping
+from pytorch_lightning.callbacks import (
+    ModelCheckpoint,
+    ModelPruning,
+    EarlyStopping,
+    StochasticWeightAveraging,
+)
 from torch.utils.tensorboard.writer import SummaryWriter
 import os
 import torch
@@ -118,9 +123,11 @@ def call_backs(args, path):
     - callback_list: 配置好的回调函数列表
     """
     # 检查点回调（保存最好的模型）
+    monitor_metric = getattr(args, "monitor", "val_loss")
+    filename_metric = str(monitor_metric).replace("/", "_")
     checkpoint_callback = ModelCheckpoint(
-        monitor=args.monitor,
-        filename='model-{epoch:02d}-{val_loss:.4f}',
+        monitor=monitor_metric,
+        filename=f"model-{{epoch:02d}}-{{{filename_metric}:.4f}}",
         save_top_k=getattr(args, 'save_top_k', 1),  # 从args中读取保存的模型数量
         save_last=getattr(args, 'save_last', True),
         mode='min',
@@ -155,6 +162,15 @@ def call_backs(args, path):
     if getattr(args, "early_stopping", False):
         early_stopping = create_early_stopping_callback(args)
         callback_list.append(early_stopping)
+
+    if getattr(args, "swa_enabled", False):
+        callback_list.append(
+            StochasticWeightAveraging(
+                swa_lrs=float(getattr(args, "swa_lrs", 1e-4)),
+                swa_epoch_start=float(getattr(args, "swa_epoch_start", 0.6)),
+                annealing_epochs=int(getattr(args, "swa_annealing_epochs", 10)),
+            )
+        )
     
     return callback_list
 
