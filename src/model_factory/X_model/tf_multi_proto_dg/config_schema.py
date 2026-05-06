@@ -206,19 +206,34 @@ class TFMultiProtoDGConfig:
     time_patch_count: int = 8
     time_patch_mode: str = "uniform"
     time_patch_width: int | None = None
+    time_patch_widths: List[int] | None = None
     freq_band_count: int = 8
     freq_band_mode: str = "uniform"
     freq_band_width: int | None = None
+    freq_band_widths: List[int] | None = None
     region_sampling_mode: str = "global_random"
     region_sampling_seed_offset: int = 0
     transparent_backbone_enabled: bool = False
     transparent_backbone_weight: float = 0.0
+    transparent_backbone_deterministic_init: bool = False
+    transparent_backbone_time_deterministic_init: bool | None = None
+    transparent_backbone_freq_deterministic_init: bool | None = None
+    transparent_time_dual_basis_enabled: bool = False
     transparent_backbone_layers: int = 2
     transparent_backbone_modules: List[str] = field(default_factory=list)
     transparent_backbone_features: List[str] = field(default_factory=list)
+    transparent_backbone_freq_modules: List[str] = field(default_factory=list)
+    transparent_backbone_freq_features: List[str] = field(default_factory=list)
     transparent_backbone_out_channels: int = 3
     transparent_backbone_scale: int = 4
     transparent_backbone_skip_connection: bool = True
+    transparent_backbone_feature_norm: str = "legacy_running"
+    transparent_backbone_feature_norm_eps: float = 0.1
+    transparent_projection_init_mode: str = "random_normal"
+    structured_global_enabled: bool = True
+    cross_patch_norm_enabled: bool = False
+    cross_patch_norm_scope: str = "anomaly"
+    evidence_dropout_rate: float = 0.0
     region_ensemble_samples: int = 1
     stability_consistency_weight: float = 0.0
     eval_mc_samples: int = 1
@@ -245,6 +260,16 @@ class TFMultiProtoDGConfig:
     num_prototypes_per_class: int = 4
     prototype_temperature: float = 0.07
     prototype_class_pool_mode: str = "logsumexp"
+    prototype_class_anchor_mode: str = "mean"
+    prototype_anchor_input: str = "global"
+    prototype_concept_input: str = "h"
+    prototype_assignment_input: str = "concept"
+    local_anomaly_residual_mode: str = "direct"
+    local_anomaly_gate_mode: str = "cross_focus"
+    semantic_residual_init: str = "anomaly_zero"
+    prototype_residual_score_mode: str = "dot_difference"
+    prototype_residual_logit_weight: float = 1.0
+    prototype_residual_logit_mode: str = "static"
     adaptive_class_temperature_enabled: bool = False
     adaptive_class_temperature_target_neff: float = 2.0
     adaptive_class_temperature_min_scale: float = 0.5
@@ -276,6 +301,7 @@ class TFMultiProtoDGConfig:
     role_nonneg: str = "none"
     role_input_norm: str = "layernorm"
     role_output_norm: str = "none"
+    role_init_mode: str = "random_normal"
     cross_score_norm: str = "layernorm"
     cross_pool_mode: str = "logsumexp"
     cross_pool_tau: float = 0.5
@@ -494,7 +520,84 @@ def build_model_config(args_model: Any, metadata: Any) -> TFMultiProtoDGConfig:
     prototype_class_pool_mode = _validate_choice(
         str(getattr(args_model, "prototype_class_pool_mode", "logsumexp")),
         "model.prototype_class_pool_mode",
-        {"logsumexp", "max"},
+        {"logsumexp", "max", "mean", "adaptive_consensus"},
+    )
+    prototype_class_anchor_mode = _validate_choice(
+        str(getattr(args_model, "prototype_class_anchor_mode", "mean")),
+        "model.prototype_class_anchor_mode",
+        {"mean", "independent", "tied_offset", "hybrid_tied_mean"},
+    )
+    prototype_anchor_input = _validate_choice(
+        str(getattr(args_model, "prototype_anchor_input", "global")),
+        "model.prototype_anchor_input",
+        {
+            "h",
+            "core",
+            "global",
+            "global_fused_mean",
+            "dual_residual",
+            "dual_residual_margin",
+            "dual_anchor_margin",
+            "dual_mean",
+        },
+    )
+    prototype_concept_input = _validate_choice(
+        str(getattr(args_model, "prototype_concept_input", "h")),
+        "model.prototype_concept_input",
+        {"h", "core", "local_anomaly", "relative", "dual_relative", "dual_relative_learned"},
+    )
+    prototype_assignment_input = _validate_choice(
+        str(getattr(args_model, "prototype_assignment_input", "concept")),
+        "model.prototype_assignment_input",
+        {"concept", "local_anomaly"},
+    )
+    local_anomaly_residual_mode = _validate_choice(
+        str(getattr(args_model, "local_anomaly_residual_mode", "direct")),
+        "model.local_anomaly_residual_mode",
+        {"direct", "direct_delta", "off", "mlp"},
+    )
+    local_anomaly_gate_mode = _validate_choice(
+        str(getattr(args_model, "local_anomaly_gate_mode", "cross_focus")),
+        "model.local_anomaly_gate_mode",
+        {"cross_focus", "anomaly_focus", "disagreement", "disagreement_aligned"},
+    )
+    semantic_residual_init = _validate_choice(
+        str(getattr(args_model, "semantic_residual_init", "anomaly_zero")),
+        "model.semantic_residual_init",
+        {"zero", "default", "anomaly_zero", "small"},
+    )
+    prototype_residual_score_mode = _validate_choice(
+        str(getattr(args_model, "prototype_residual_score_mode", "dot_difference")),
+        "model.prototype_residual_score_mode",
+        {"dot_difference", "anchored_offset", "anchored_routing"},
+    )
+    prototype_residual_logit_weight = _coerce_non_negative_float(
+        getattr(args_model, "prototype_residual_logit_weight", 1.0),
+        "model.prototype_residual_logit_weight",
+        1.0,
+    )
+    prototype_residual_logit_mode = _validate_choice(
+        str(getattr(args_model, "prototype_residual_logit_mode", "static")),
+        "model.prototype_residual_logit_mode",
+        {
+            "static",
+            "agreement",
+            "agreement_tf_balance",
+            "local_evidence",
+            "agreement_local_centered",
+            "local_competition",
+            "global_local_consensus",
+            "agreement_global_local_consensus",
+            "agreement_anchor_support",
+            "anchor_prior",
+            "agreement_anchor_prior",
+            "anchor_uncertainty_centered",
+            "agreement_anchor_uncertainty_centered",
+            "agreement_candidate_centered",
+            "anchor_residual_margin_mix",
+            "agreement_anchor_residual_margin_mix",
+            "agreement_candidate_margin_mix",
+        },
     )
     adaptive_class_temperature_enabled = bool(
         getattr(args_model, "adaptive_class_temperature_enabled", False)
@@ -664,6 +767,7 @@ def build_model_config(args_model: Any, metadata: Any) -> TFMultiProtoDGConfig:
             "semantic_stats",
             "semantic_stats_mlp",
             "semantic_tokens_attn",
+            "semantic_tokens_query",
             "local_anomaly_summary",
             "local_anomaly_profile",
             "structured_masked",
@@ -673,7 +777,7 @@ def build_model_config(args_model: Any, metadata: Any) -> TFMultiProtoDGConfig:
     classifier_residual_init = _validate_choice(
         str(_namespace_get(classifier_raw, "residual_init", "default")),
         "model.classifier.residual_init",
-        {"default", "projected_raw", "raw_svd", "feature_hash"},
+        {"default", "projected_raw", "raw_svd", "feature_hash", "dct", "zero"},
     )
     classifier_residual_alignment_mode = _validate_choice(
         str(_namespace_get(classifier_raw, "residual_alignment_mode", "off")),
@@ -818,6 +922,11 @@ def build_model_config(args_model: Any, metadata: Any) -> TFMultiProtoDGConfig:
         "model.role_output_norm",
         {"layernorm", "l2", "none"},
     )
+    role_init_mode = _validate_choice(
+        str(getattr(args_model, "role_init_mode", "random_normal")),
+        "model.role_init_mode",
+        {"random_normal", "dct"},
+    )
     cross_score_norm = _validate_choice(
         str(getattr(args_model, "cross_score_norm", "layernorm")),
         "model.cross_score_norm",
@@ -926,6 +1035,25 @@ def build_model_config(args_model: Any, metadata: Any) -> TFMultiProtoDGConfig:
         raise ValueError(
             "model.time_patch_width requires model.time_patch_mode in {'random', 'random_stratified'}."
         )
+    # Multi-granularity time patch widths: when provided, process patches at
+    # multiple widths simultaneously and aggregate in the role space.
+    time_patch_widths_raw = getattr(args_model, "time_patch_widths", None)
+    time_patch_widths: List[int] | None = None
+    if time_patch_widths_raw is not None:
+        if isinstance(time_patch_widths_raw, str):
+            raise ValueError("model.time_patch_widths must be a list of positive integers.")
+        if isinstance(time_patch_widths_raw, (list, tuple)):
+            if len(time_patch_widths_raw) < 1:
+                raise ValueError("model.time_patch_widths requires at least 1 secondary width.")
+            widths: List[int] = []
+            for i, w in enumerate(time_patch_widths_raw):
+                w_int = _coerce_positive_int(w, f"model.time_patch_widths[{i}]")
+                widths.append(w_int)
+            time_patch_widths = widths
+            if time_patch_mode not in {"random", "random_stratified"}:
+                raise ValueError(
+                    "model.time_patch_widths requires model.time_patch_mode in {'random', 'random_stratified'}."
+                )
     padding_mode = str(getattr(args_model, "padding_mode", "error"))
     if (
         time_patch_mode in {"random", "random_stratified"}
@@ -936,6 +1064,13 @@ def build_model_config(args_model: Any, metadata: Any) -> TFMultiProtoDGConfig:
         raise ValueError(
             "model.time_patch_width cannot exceed model.input_length when model.padding_mode='error'."
         )
+    if time_patch_widths is not None:
+        for i, w in enumerate(time_patch_widths):
+            if w > input_length and padding_mode == "error":
+                raise ValueError(
+                    f"model.time_patch_widths[{i}]={w} cannot exceed "
+                    f"model.input_length={input_length} when model.padding_mode='error'."
+                )
     freq_bins = input_length // 2 + 1
     freq_band_mode = _validate_choice(
         str(getattr(args_model, "freq_band_mode", "uniform")),
@@ -978,6 +1113,30 @@ def build_model_config(args_model: Any, metadata: Any) -> TFMultiProtoDGConfig:
         "model.transparent_backbone_weight",
         0.0,
     )
+    transparent_backbone_deterministic_init = bool(
+        getattr(args_model, "transparent_backbone_deterministic_init", False)
+    )
+    transparent_backbone_time_deterministic_init = getattr(
+        args_model,
+        "transparent_backbone_time_deterministic_init",
+        None,
+    )
+    if transparent_backbone_time_deterministic_init is not None:
+        transparent_backbone_time_deterministic_init = bool(
+            transparent_backbone_time_deterministic_init
+        )
+    transparent_backbone_freq_deterministic_init = getattr(
+        args_model,
+        "transparent_backbone_freq_deterministic_init",
+        None,
+    )
+    if transparent_backbone_freq_deterministic_init is not None:
+        transparent_backbone_freq_deterministic_init = bool(
+            transparent_backbone_freq_deterministic_init
+        )
+    transparent_time_dual_basis_enabled = bool(
+        getattr(args_model, "transparent_time_dual_basis_enabled", False)
+    )
     transparent_backbone_layers = _coerce_non_negative_int(
         getattr(args_model, "transparent_backbone_layers", 2),
         "model.transparent_backbone_layers",
@@ -990,6 +1149,14 @@ def build_model_config(args_model: Any, metadata: Any) -> TFMultiProtoDGConfig:
     transparent_backbone_features = _as_list(
         getattr(args_model, "transparent_backbone_features", None),
         ["Mean", "Std", "Entropy", "RMS", "Kurtosis", "CrestFactor"],
+    )
+    transparent_backbone_freq_modules = _as_list(
+        getattr(args_model, "transparent_backbone_freq_modules", None),
+        ["IdentitySpectrum", "LogSpectrum", "SpectralWhitening", "GaussianBandMask"],
+    )
+    transparent_backbone_freq_features = _as_list(
+        getattr(args_model, "transparent_backbone_freq_features", None),
+        ["BandEnergy", "BandRMS", "SpectralEntropy", "PeakRatio"],
     )
     transparent_backbone_out_channels = _coerce_positive_int(
         getattr(args_model, "transparent_backbone_out_channels", 3),
@@ -1004,6 +1171,37 @@ def build_model_config(args_model: Any, metadata: Any) -> TFMultiProtoDGConfig:
     transparent_backbone_skip_connection = bool(
         getattr(args_model, "transparent_backbone_skip_connection", True)
     )
+    transparent_backbone_feature_norm = _validate_choice(
+        str(getattr(args_model, "transparent_backbone_feature_norm", "legacy_running")),
+        "model.transparent_backbone_feature_norm",
+        {"layernorm", "legacy_running"},
+    )
+    transparent_backbone_feature_norm_eps = _coerce_non_negative_float(
+        getattr(args_model, "transparent_backbone_feature_norm_eps", 0.1),
+        "model.transparent_backbone_feature_norm_eps",
+        0.1,
+    )
+    if transparent_backbone_feature_norm_eps <= 0.0:
+        raise ValueError("model.transparent_backbone_feature_norm_eps must be > 0.")
+    transparent_projection_init_mode = _validate_choice(
+        str(getattr(args_model, "transparent_projection_init_mode", "random_normal")),
+        "model.transparent_projection_init_mode",
+        {"random_normal", "dct", "dct_feature", "dct_to_role"},
+    )
+    structured_global_enabled = bool(getattr(args_model, "structured_global_enabled", True))
+    cross_patch_norm_enabled = bool(getattr(args_model, "cross_patch_norm_enabled", False))
+    cross_patch_norm_scope = _validate_choice(
+        str(getattr(args_model, "cross_patch_norm_scope", "anomaly")),
+        "model.cross_patch_norm_scope",
+        {"anomaly", "time", "freq", "both"},
+    )
+    evidence_dropout_rate = _coerce_non_negative_float(
+        getattr(args_model, "evidence_dropout_rate", 0.0),
+        "model.evidence_dropout_rate",
+        0.0,
+    )
+    if evidence_dropout_rate >= 1.0:
+        raise ValueError("model.evidence_dropout_rate must be < 1.0.")
     region_ensemble_samples = _coerce_positive_int(
         getattr(args_model, "region_ensemble_samples", 1),
         "model.region_ensemble_samples",
@@ -1100,6 +1298,22 @@ def build_model_config(args_model: Any, metadata: Any) -> TFMultiProtoDGConfig:
         raise ValueError(
             "model.transparent_backbone_layers must be positive when the transparent backbone is enabled."
         )
+    if transparent_backbone_enabled and len(transparent_backbone_modules) == 0:
+        raise ValueError(
+            "model.transparent_backbone_modules cannot be empty when transparent backbone is enabled."
+        )
+    if transparent_backbone_enabled and len(transparent_backbone_features) == 0:
+        raise ValueError(
+            "model.transparent_backbone_features cannot be empty when transparent backbone is enabled."
+        )
+    if transparent_backbone_enabled and len(transparent_backbone_freq_modules) == 0:
+        raise ValueError(
+            "model.transparent_backbone_freq_modules cannot be empty when transparent backbone is enabled."
+        )
+    if transparent_backbone_enabled and len(transparent_backbone_freq_features) == 0:
+        raise ValueError(
+            "model.transparent_backbone_freq_features cannot be empty when transparent backbone is enabled."
+        )
 
     config = TFMultiProtoDGConfig(
         name=str(getattr(args_model, "name", "TF_MultiProtoDG")),
@@ -1119,6 +1333,7 @@ def build_model_config(args_model: Any, metadata: Any) -> TFMultiProtoDGConfig:
         ),
         time_patch_mode=time_patch_mode,
         time_patch_width=time_patch_width,
+        time_patch_widths=time_patch_widths,
         freq_band_count=_coerce_positive_int(
             getattr(args_model, "freq_band_count", 8),
             "model.freq_band_count",
@@ -1130,12 +1345,25 @@ def build_model_config(args_model: Any, metadata: Any) -> TFMultiProtoDGConfig:
         region_sampling_seed_offset=region_sampling_seed_offset,
         transparent_backbone_enabled=transparent_backbone_enabled,
         transparent_backbone_weight=transparent_backbone_weight,
+        transparent_backbone_deterministic_init=transparent_backbone_deterministic_init,
+        transparent_backbone_time_deterministic_init=transparent_backbone_time_deterministic_init,
+        transparent_backbone_freq_deterministic_init=transparent_backbone_freq_deterministic_init,
+        transparent_time_dual_basis_enabled=transparent_time_dual_basis_enabled,
         transparent_backbone_layers=transparent_backbone_layers,
         transparent_backbone_modules=transparent_backbone_modules,
         transparent_backbone_features=transparent_backbone_features,
+        transparent_backbone_freq_modules=transparent_backbone_freq_modules,
+        transparent_backbone_freq_features=transparent_backbone_freq_features,
         transparent_backbone_out_channels=transparent_backbone_out_channels,
         transparent_backbone_scale=transparent_backbone_scale,
         transparent_backbone_skip_connection=transparent_backbone_skip_connection,
+        transparent_backbone_feature_norm=transparent_backbone_feature_norm,
+        transparent_backbone_feature_norm_eps=transparent_backbone_feature_norm_eps,
+        transparent_projection_init_mode=transparent_projection_init_mode,
+        structured_global_enabled=structured_global_enabled,
+        cross_patch_norm_enabled=cross_patch_norm_enabled,
+        cross_patch_norm_scope=cross_patch_norm_scope,
+        evidence_dropout_rate=evidence_dropout_rate,
         region_ensemble_samples=region_ensemble_samples,
         stability_consistency_weight=stability_consistency_weight,
         eval_mc_samples=eval_mc_samples,
@@ -1162,6 +1390,16 @@ def build_model_config(args_model: Any, metadata: Any) -> TFMultiProtoDGConfig:
         num_prototypes_per_class=num_prototypes_per_class,
         prototype_temperature=prototype_temperature,
         prototype_class_pool_mode=prototype_class_pool_mode,
+        prototype_class_anchor_mode=prototype_class_anchor_mode,
+        prototype_anchor_input=prototype_anchor_input,
+        prototype_concept_input=prototype_concept_input,
+        prototype_assignment_input=prototype_assignment_input,
+        local_anomaly_residual_mode=local_anomaly_residual_mode,
+        local_anomaly_gate_mode=local_anomaly_gate_mode,
+        semantic_residual_init=semantic_residual_init,
+        prototype_residual_score_mode=prototype_residual_score_mode,
+        prototype_residual_logit_weight=prototype_residual_logit_weight,
+        prototype_residual_logit_mode=prototype_residual_logit_mode,
         adaptive_class_temperature_enabled=adaptive_class_temperature_enabled,
         adaptive_class_temperature_target_neff=adaptive_class_temperature_target_neff,
         adaptive_class_temperature_min_scale=adaptive_class_temperature_min_scale,
@@ -1193,6 +1431,7 @@ def build_model_config(args_model: Any, metadata: Any) -> TFMultiProtoDGConfig:
         role_nonneg=role_nonneg,
         role_input_norm=role_input_norm,
         role_output_norm=role_output_norm,
+        role_init_mode=role_init_mode,
         cross_score_norm=cross_score_norm,
         cross_pool_mode=cross_pool_mode,
         cross_pool_tau=cross_pool_tau,

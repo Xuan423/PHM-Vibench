@@ -70,9 +70,9 @@ class HierarchicalEvidenceIntegration(nn.Module):
         g_t_summary = self._normalize(g_t_summary)
         g_f_summary = self._normalize(g_f_summary)
         interaction = self._normalize(g_t_summary * g_f_summary)
-        local_global_gap = self._normalize(
-            0.5 * ((g_t_local - g_t_global).abs() + (g_f_local - g_f_global).abs())
-        )
+        time_gap = (g_t_local - g_t_global).abs()
+        freq_gap = (g_f_local - g_f_global).abs()
+        local_global_gap = self._normalize(0.5 * (time_gap + freq_gap))
 
         h = torch.cat([g_t_summary, g_f_summary, interaction, local_global_gap], dim=-1)
         extras = {
@@ -85,5 +85,7 @@ class HierarchicalEvidenceIntegration(nn.Module):
             "g_t_summary": g_t_summary,
             "g_f_summary": g_f_summary,
             "local_global_gap": local_global_gap,
+            "time_gap": time_gap,
+            "freq_gap": freq_gap,
         }
         return h, extras

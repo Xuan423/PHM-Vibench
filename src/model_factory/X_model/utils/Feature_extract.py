@@ -138,6 +138,48 @@ class ShapeFactorFeature(FeatureExtractionBase):
             lambda x: torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True)) / torch.mean(torch.abs(x), dim=-1, keepdim=True)
         )
         self.name = "ShapeFactor"
+
+
+class BandEnergyFeature(FeatureExtractionBase):
+    def __init__(self):
+        super(BandEnergyFeature, self).__init__("band_energy")
+        self.register_feature_method(
+            lambda x: torch.sum(x ** 2, dim=-1, keepdim=True)
+        )
+        self.name = "BandEnergy"
+
+
+class BandRMSFeature(FeatureExtractionBase):
+    def __init__(self):
+        super(BandRMSFeature, self).__init__("band_rms")
+        self.register_feature_method(
+            lambda x: torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + 1e-8)
+        )
+        self.name = "BandRMS"
+
+
+class SpectralEntropyFeature(FeatureExtractionBase):
+    def __init__(self):
+        super(SpectralEntropyFeature, self).__init__("spectral_entropy")
+        self.register_feature_method(self._spectral_entropy)
+        self.name = "SpectralEntropy"
+
+    @staticmethod
+    def _spectral_entropy(x: torch.Tensor) -> torch.Tensor:
+        eps = 1e-8
+        p = torch.abs(x)
+        p = p / torch.clamp(torch.sum(p, dim=-1, keepdim=True), min=eps)
+        return -torch.sum(p * torch.log(torch.clamp(p, min=eps)), dim=-1, keepdim=True)
+
+
+class PeakRatioFeature(FeatureExtractionBase):
+    def __init__(self):
+        super(PeakRatioFeature, self).__init__("peak_ratio")
+        self.register_feature_method(
+            lambda x: torch.max(torch.abs(x), dim=-1, keepdim=True)[0]
+            / torch.clamp(torch.mean(torch.abs(x), dim=-1, keepdim=True), min=1e-8)
+        )
+        self.name = "PeakRatio"
 # CrestFactorDelta
 class CrestFactorDeltaFeature(FeatureExtractionBase):
     def __init__(self):

@@ -67,6 +67,11 @@ class CrossEvidencePooling(nn.Module):
         entropy = -(weights.clamp_min(1e-6) * weights.clamp_min(1e-6).log()).sum(dim=1, keepdim=True)
         return entropy / math.log(float(weights.shape[1]))
 
+    @staticmethod
+    def _distribution_confidence(weights: torch.Tensor) -> torch.Tensor:
+        """Peakness of a local evidence distribution, normalized to [0, 1]."""
+        return (1.0 - CrossEvidencePooling._normalized_entropy(weights)).clamp(0.0, 1.0)
+
     def forward(
         self, z_t: torch.Tensor, z_f: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -94,8 +99,12 @@ class CrossEvidencePooling(nn.Module):
             w_t_self = torch.softmax(self._self_scores(z_t), dim=1)
             w_f_self = torch.softmax(self._self_scores(z_f), dim=1)
             if self.adaptive_self_mix:
-                mix_t = self_mix * self._normalized_entropy(w_t_cross).detach()
-                mix_f = self_mix * self._normalized_entropy(w_f_cross).detach()
+                # Use self-abnormal evidence only when cross evidence is ambiguous
+                # and the abnormality itself is spatially/band-wise concentrated.
+                conf_t = self._distribution_confidence(w_t_self).detach()
+                conf_f = self._distribution_confidence(w_f_self).detach()
+                mix_t = self_mix * self._normalized_entropy(w_t_cross).detach() * conf_t
+                mix_f = self_mix * self._normalized_entropy(w_f_cross).detach() * conf_f
             else:
                 mix_t = self_mix
                 mix_f = self_mix

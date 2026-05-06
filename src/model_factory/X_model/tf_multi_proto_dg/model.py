@@ -29,7 +29,7 @@ from .partitioning import (
 from .prototype_head import PrototypeHead
 from .tensor_ops import safe_rfft_amplitude, to_bcl
 from .time_operators import build_time_operator_bank
-from src.model_factory.X_model.TSPN import Model as TSPNBackbone
+from .transparent_global_backbone import TransparentGlobalBackbone
 
 
 class Model(nn.Module):
@@ -47,6 +47,19 @@ class Model(nn.Module):
             padding_mode=self.config.padding_mode,
             patch_width=self.config.time_patch_width,
         )
+        # Multi-granularity: resolve all secondary widths.
+        if self.config.time_patch_widths is not None:
+            self.time_patch_widths = [
+                resolve_time_patch_width(
+                    length=self.config.input_length,
+                    patch_count=self.config.time_patch_count,
+                    padding_mode=self.config.padding_mode,
+                    patch_width=w,
+                )
+                for w in self.config.time_patch_widths
+            ]
+        else:
+            self.time_patch_widths = None
         freq_bins = self.config.input_length // 2 + 1
         self.freq_band_width = resolve_freq_band_width(
             freq_bins=freq_bins,
@@ -76,9 +89,20 @@ class Model(nn.Module):
             self.config.region_sampling_seed_offset
         )
         self.active_component_summary["region_ensemble_samples"] = int(self.config.region_ensemble_samples)
+        if self.time_patch_widths is not None:
+            self.active_component_summary["multi_granularity_time"] = {
+                "widths": self.time_patch_widths,
+                "mode": "role_average",
+            }
         self.active_component_summary["hierarchical_evidence"] = {
             "enabled": True,
-            "global_anchor": "transparent_operator_indicator_summary",
+            "global_anchor": "dual_deep_global_tf_summary",
+            "structured_global_enabled": bool(self.config.structured_global_enabled),
+            "global_fusion_mode": (
+                "agreement_adaptive_deep_structured"
+                if bool(self.config.structured_global_enabled)
+                else "deep_only"
+            ),
             "branch_summaries": ["time_summary", "freq_summary"],
         }
         mix_total = (
@@ -86,10 +110,10 @@ class Model(nn.Module):
             + float(self.config.cooperative_confidence_mix)
             + float(self.config.cooperative_agreement_mix)
         )
-        cooperative_enabled = bool(self.config.cooperative_prototypes_enabled)
+        self.cooperative_enabled = bool(self.config.cooperative_prototypes_enabled)
         self.active_component_summary["cooperative_prototypes"] = {
-            "enabled": cooperative_enabled,
-            "heads": ["time", "freq", "joint"] if cooperative_enabled else ["joint"],
+            "enabled": self.cooperative_enabled,
+            "heads": ["time", "freq", "joint"] if self.cooperative_enabled else ["joint"],
             "priors": {
                 "time": float(self.config.cooperative_time_prior),
                 "freq": float(self.config.cooperative_freq_prior),
@@ -114,7 +138,6 @@ class Model(nn.Module):
                 else "standardized_prototype_residual"
             ),
         }
-
         self.time_basis_dim = (
             len(self.time_operator_bank.operator_names) * len(self.config.time_indicators)
         )
@@ -164,6 +187,7 @@ class Model(nn.Module):
             nonneg=self.config.role_nonneg,
             input_norm=self.config.role_input_norm,
             output_norm=self.config.role_output_norm,
+            init_mode=self.config.role_init_mode,
         )
         self.freq_role_compression = EvidenceRoleCompression(
             in_features=self.freq_basis_dim,
@@ -171,6 +195,7 @@ class Model(nn.Module):
             nonneg=self.config.role_nonneg,
             input_norm=self.config.role_input_norm,
             output_norm=self.config.role_output_norm,
+            init_mode=self.config.role_init_mode,
         )
         self.cross_evidence_pooling = CrossEvidencePooling(
             score_norm=self.config.cross_score_norm,
@@ -200,8 +225,63 @@ class Model(nn.Module):
         self.global_semantic_proj = nn.Linear(self.config.concept_dim, self.config.concept_dim, bias=False)
         self.global_semantic_out = nn.Linear(self.config.concept_dim, self.config.concept_dim, bias=False)
         self.global_semantic_norm = nn.LayerNorm(self.config.concept_dim)
+        self.evidence_path_gate_weight: Optional[nn.Parameter] = None
+        if str(getattr(self.config, "prototype_concept_input", "h")) == "dual_relative_learned":
+            # Zero-init keeps the initial decision as an unbiased 50/50 evidence
+            # average without consuming RNG; CE then learns which interpretable
+            # evidence-quality coordinates are reliable.
+            self.evidence_path_gate_weight = nn.Parameter(torch.zeros(4, 2))
+        self.local_anomaly_residual_mode = str(
+            getattr(self.config, "local_anomaly_residual_mode", "direct")
+        )
         self.anomaly_residual_norm = nn.LayerNorm(self.config.concept_dim)
-        self.anomaly_residual_proj = nn.Linear(self.config.concept_dim, self.config.concept_dim, bias=False)
+        if self.local_anomaly_residual_mode in {"mlp", "direct_delta"}:
+            self.anomaly_residual_proj = nn.Linear(
+                self.config.concept_dim,
+                self.config.concept_dim,
+                bias=False,
+            )
+        else:
+            self.anomaly_residual_proj = None
+        self.semantic_residual_init = str(
+            getattr(self.config, "semantic_residual_init", "anomaly_zero")
+        )
+        if self.semantic_residual_init == "zero":
+            nn.init.zeros_(self.time_role_refiner[-1].weight)
+            nn.init.zeros_(self.freq_role_refiner[-1].weight)
+            nn.init.zeros_(self.global_semantic_out.weight)
+        elif self.semantic_residual_init == "small":
+            nn.init.xavier_uniform_(self.time_role_refiner[-1].weight, gain=0.1)
+            nn.init.xavier_uniform_(self.freq_role_refiner[-1].weight, gain=0.1)
+            nn.init.xavier_uniform_(self.global_semantic_out.weight, gain=0.1)
+            if self.anomaly_residual_proj is not None:
+                nn.init.xavier_uniform_(self.anomaly_residual_proj.weight, gain=0.1)
+        if self.semantic_residual_init in {"zero", "anomaly_zero"}:
+            if self.anomaly_residual_proj is not None:
+                nn.init.zeros_(self.anomaly_residual_proj.weight)
+        self.global_deep_enabled = bool(
+            self.config.transparent_backbone_enabled and self.config.transparent_backbone_weight > 0.0
+        )
+        self.transparent_backbone = None
+        self.transparent_time_backbone = None
+        self.transparent_freq_backbone = None
+        self.transparent_time_basis_backbone = None
+        self.transparent_feature_dim = 0
+        self.transparent_time_feature_dim = 0
+        self.transparent_freq_feature_dim = 0
+        self.transparent_feature_names: list[str] = []
+        self.transparent_time_feature_names: list[str] = []
+        self.transparent_freq_feature_names: list[str] = []
+        self.transparent_time_feature_norm: Optional[nn.LayerNorm] = None
+        self.transparent_time_feature_proj: Optional[nn.Linear] = None
+        self.transparent_freq_feature_norm: Optional[nn.LayerNorm] = None
+        self.transparent_freq_feature_proj: Optional[nn.Linear] = None
+        self.transparent_time_to_role: Optional[nn.Linear] = None
+        self.transparent_freq_to_role: Optional[nn.Linear] = None
+        self.transparent_time_basis_feature_norm: Optional[nn.LayerNorm] = None
+        self.transparent_time_basis_feature_proj: Optional[nn.Linear] = None
+        self.transparent_time_basis_to_role: Optional[nn.Linear] = None
+        self.transparent_time_basis_mix_logit: Optional[nn.Parameter] = None
         self.residual_enabled = float(self.config.classifier.residual_weight) > 0.0
         self.residual_input_mode = str(self.config.classifier.residual_input)
         self.raw_feature_residual_topk: Optional[int] = None
@@ -229,6 +309,16 @@ class Model(nn.Module):
         self.semantic_tokens_value_proj: Optional[nn.Linear] = None
         self.semantic_tokens_out_norm: Optional[nn.LayerNorm] = None
         self.semantic_tokens_residual_proj: Optional[nn.Linear] = None
+        residual_rng_state = None
+        residual_cuda_rng_state = None
+        residual_init_mode_for_rng = str(getattr(self.config.classifier, "residual_init", "default"))
+        if self.residual_enabled and residual_init_mode_for_rng in {"zero", "dct", "feature_hash"}:
+            # Deterministic residual branches should not perturb downstream
+            # initialization.  nn.Linear consumes RNG during construction even
+            # when its weights are overwritten immediately afterwards.
+            residual_rng_state = torch.random.get_rng_state()
+            if torch.cuda.is_available():
+                residual_cuda_rng_state = torch.cuda.get_rng_state_all()
         if self.residual_enabled:
             residual_proj_in_dim = int(self.feature_dim)
             if self.residual_input_mode == "fixed_semantic_coord":
@@ -262,7 +352,7 @@ class Model(nn.Module):
                 )
                 self.raw_feature_residual_norm = None
                 self.raw_feature_residual_proj = None
-            elif self.residual_input_mode == "semantic_tokens_attn":
+            elif self.residual_input_mode in {"semantic_tokens_attn", "semantic_tokens_query"}:
                 token_dim = self.config.classifier.residual_rank
                 if token_dim is None:
                     token_dim = int(self.config.concept_dim)
@@ -275,15 +365,16 @@ class Model(nn.Module):
                     token_dim,
                     bias=False,
                 )
-                self.semantic_tokens_self_attn = nn.MultiheadAttention(
-                    embed_dim=token_dim,
-                    num_heads=num_heads,
-                    batch_first=True,
-                )
-                self.semantic_tokens_self_attn_norm = nn.LayerNorm(token_dim)
-                self.semantic_tokens_ffn_in = nn.Linear(token_dim, 2 * token_dim, bias=False)
-                self.semantic_tokens_ffn_out = nn.Linear(2 * token_dim, token_dim, bias=False)
-                self.semantic_tokens_ffn_norm = nn.LayerNorm(token_dim)
+                if self.residual_input_mode == "semantic_tokens_attn":
+                    self.semantic_tokens_self_attn = nn.MultiheadAttention(
+                        embed_dim=token_dim,
+                        num_heads=num_heads,
+                        batch_first=True,
+                    )
+                    self.semantic_tokens_self_attn_norm = nn.LayerNorm(token_dim)
+                    self.semantic_tokens_ffn_in = nn.Linear(token_dim, 2 * token_dim, bias=False)
+                    self.semantic_tokens_ffn_out = nn.Linear(2 * token_dim, token_dim, bias=False)
+                    self.semantic_tokens_ffn_norm = nn.LayerNorm(token_dim)
                 self.semantic_tokens_query_proj = nn.Linear(
                     self.config.concept_dim,
                     token_dim,
@@ -395,6 +486,10 @@ class Model(nn.Module):
                     residual_proj_in_dim, self.config.concept_dim, bias=False
                 )
             self._init_residual_projection_for_stability()
+            if residual_rng_state is not None:
+                torch.random.set_rng_state(residual_rng_state)
+                if residual_cuda_rng_state is not None and torch.cuda.is_available():
+                    torch.cuda.set_rng_state_all(residual_cuda_rng_state)
         else:
             self.raw_feature_residual_norm = None
             self.raw_feature_residual_proj = None
@@ -440,62 +535,33 @@ class Model(nn.Module):
                 ],
                 "slot_count": int(self.semantic_coord_slot_count),
             }
-        if self.residual_enabled and self.residual_input_mode == "semantic_tokens_attn":
-            residual_summary["semantic_tokens_attn"] = {
+        if self.residual_enabled and self.residual_input_mode in {
+            "semantic_tokens_attn",
+            "semantic_tokens_query",
+        }:
+            residual_summary[self.residual_input_mode] = {
                 "token_count": int(self.semantic_coord_token_count),
                 "token_dim": int(self.semantic_tokens_attn_dim or 0),
                 "stats": ["mean", "std", "maxabs", "global"],
-                "pooling": "core_query_attention",
+                "pooling": (
+                    "self_attention_then_core_query"
+                    if self.residual_input_mode == "semantic_tokens_attn"
+                    else "core_query_attention"
+                ),
             }
         self.active_component_summary["residual_branch"] = residual_summary
-        self.time_prototype_head = PrototypeHead(
-            num_classes=self.config.num_classes,
-            concept_dim=self.config.role_dim,
-            num_prototypes_per_class=self.config.num_prototypes_per_class,
-            temperature=self.config.prototype_temperature,
-            class_pool_mode=self.config.prototype_class_pool_mode,
-            adaptive_class_temperature_enabled=self.config.adaptive_class_temperature_enabled,
-            adaptive_class_temperature_target_neff=self.config.adaptive_class_temperature_target_neff,
-            adaptive_class_temperature_min_scale=self.config.adaptive_class_temperature_min_scale,
-            adaptive_class_temperature_max_scale=self.config.adaptive_class_temperature_max_scale,
-            adaptive_effective_k_enabled=self.config.adaptive_effective_k_enabled,
-            adaptive_effective_k_ready_count=self.config.adaptive_effective_k_ready_count,
-            adaptive_effective_k_min=self.config.adaptive_effective_k_min,
-            adaptive_effective_k_penalty=self.config.adaptive_effective_k_penalty,
-            assignment_temperature=self.config.prototype_assignment_temperature,
-            assignment_mode=self.config.prototype.assignment_mode,
-            balance_weight=self.config.prototype.balance_weight,
-            logit_scale_init=self.config.prototype_logit_scale_init,
-            init_mode=self.config.prototype_init_mode,
-            init_scale=self.config.prototype_init_scale,
-        )
-        self.freq_prototype_head = PrototypeHead(
-            num_classes=self.config.num_classes,
-            concept_dim=self.config.role_dim,
-            num_prototypes_per_class=self.config.num_prototypes_per_class,
-            temperature=self.config.prototype_temperature,
-            class_pool_mode=self.config.prototype_class_pool_mode,
-            adaptive_class_temperature_enabled=self.config.adaptive_class_temperature_enabled,
-            adaptive_class_temperature_target_neff=self.config.adaptive_class_temperature_target_neff,
-            adaptive_class_temperature_min_scale=self.config.adaptive_class_temperature_min_scale,
-            adaptive_class_temperature_max_scale=self.config.adaptive_class_temperature_max_scale,
-            adaptive_effective_k_enabled=self.config.adaptive_effective_k_enabled,
-            adaptive_effective_k_ready_count=self.config.adaptive_effective_k_ready_count,
-            adaptive_effective_k_min=self.config.adaptive_effective_k_min,
-            adaptive_effective_k_penalty=self.config.adaptive_effective_k_penalty,
-            assignment_temperature=self.config.prototype_assignment_temperature,
-            assignment_mode=self.config.prototype.assignment_mode,
-            balance_weight=self.config.prototype.balance_weight,
-            logit_scale_init=self.config.prototype_logit_scale_init,
-            init_mode=self.config.prototype_init_mode,
-            init_scale=self.config.prototype_init_scale,
-        )
+        self.time_prototype_head: Optional[PrototypeHead] = None
+        self.freq_prototype_head: Optional[PrototypeHead] = None
         self.joint_prototype_head = PrototypeHead(
             num_classes=self.config.num_classes,
             concept_dim=self.config.concept_dim,
             num_prototypes_per_class=self.config.num_prototypes_per_class,
             temperature=self.config.prototype_temperature,
             class_pool_mode=self.config.prototype_class_pool_mode,
+            class_anchor_mode=self.config.prototype_class_anchor_mode,
+            residual_score_mode=self.config.prototype_residual_score_mode,
+            residual_logit_mode=self.config.prototype_residual_logit_mode,
+            residual_logit_weight=self.config.prototype_residual_logit_weight,
             adaptive_class_temperature_enabled=self.config.adaptive_class_temperature_enabled,
             adaptive_class_temperature_target_neff=self.config.adaptive_class_temperature_target_neff,
             adaptive_class_temperature_min_scale=self.config.adaptive_class_temperature_min_scale,
@@ -511,14 +577,72 @@ class Model(nn.Module):
             init_mode=self.config.prototype_init_mode,
             init_scale=self.config.prototype_init_scale,
         )
-        self.cooperative_prototype_fusion = CooperativePrototypeFusion(
-            weight_floor=float(self.config.cooperative_weight_floor),
-            max_share=float(self.config.cooperative_max_share),
-            evidence_mix=float(self.config.cooperative_evidence_mix),
-            confidence_mix=float(self.config.cooperative_confidence_mix),
-            agreement_mix=float(self.config.cooperative_agreement_mix),
-            logit_scale_min=float(self.config.cooperative_logit_scale_min),
-        )
+        # Keep cooperative branches truly inactive when cooperative mode is disabled:
+        # do not instantiate their parameters to avoid initialization drift.
+        if self.cooperative_enabled:
+            self.time_prototype_head = PrototypeHead(
+                num_classes=self.config.num_classes,
+                concept_dim=self.config.role_dim,
+                num_prototypes_per_class=self.config.num_prototypes_per_class,
+                temperature=self.config.prototype_temperature,
+                class_pool_mode=self.config.prototype_class_pool_mode,
+                class_anchor_mode=self.config.prototype_class_anchor_mode,
+                residual_score_mode=self.config.prototype_residual_score_mode,
+                residual_logit_mode=self.config.prototype_residual_logit_mode,
+                residual_logit_weight=self.config.prototype_residual_logit_weight,
+                adaptive_class_temperature_enabled=self.config.adaptive_class_temperature_enabled,
+                adaptive_class_temperature_target_neff=self.config.adaptive_class_temperature_target_neff,
+                adaptive_class_temperature_min_scale=self.config.adaptive_class_temperature_min_scale,
+                adaptive_class_temperature_max_scale=self.config.adaptive_class_temperature_max_scale,
+                adaptive_effective_k_enabled=self.config.adaptive_effective_k_enabled,
+                adaptive_effective_k_ready_count=self.config.adaptive_effective_k_ready_count,
+                adaptive_effective_k_min=self.config.adaptive_effective_k_min,
+                adaptive_effective_k_penalty=self.config.adaptive_effective_k_penalty,
+                assignment_temperature=self.config.prototype_assignment_temperature,
+                assignment_mode=self.config.prototype.assignment_mode,
+                balance_weight=self.config.prototype.balance_weight,
+                logit_scale_init=self.config.prototype_logit_scale_init,
+                init_mode=self.config.prototype_init_mode,
+                init_scale=self.config.prototype_init_scale,
+            )
+            self.freq_prototype_head = PrototypeHead(
+                num_classes=self.config.num_classes,
+                concept_dim=self.config.role_dim,
+                num_prototypes_per_class=self.config.num_prototypes_per_class,
+                temperature=self.config.prototype_temperature,
+                class_pool_mode=self.config.prototype_class_pool_mode,
+                class_anchor_mode=self.config.prototype_class_anchor_mode,
+                residual_score_mode=self.config.prototype_residual_score_mode,
+                residual_logit_mode=self.config.prototype_residual_logit_mode,
+                residual_logit_weight=self.config.prototype_residual_logit_weight,
+                adaptive_class_temperature_enabled=self.config.adaptive_class_temperature_enabled,
+                adaptive_class_temperature_target_neff=self.config.adaptive_class_temperature_target_neff,
+                adaptive_class_temperature_min_scale=self.config.adaptive_class_temperature_min_scale,
+                adaptive_class_temperature_max_scale=self.config.adaptive_class_temperature_max_scale,
+                adaptive_effective_k_enabled=self.config.adaptive_effective_k_enabled,
+                adaptive_effective_k_ready_count=self.config.adaptive_effective_k_ready_count,
+                adaptive_effective_k_min=self.config.adaptive_effective_k_min,
+                adaptive_effective_k_penalty=self.config.adaptive_effective_k_penalty,
+                assignment_temperature=self.config.prototype_assignment_temperature,
+                assignment_mode=self.config.prototype.assignment_mode,
+                balance_weight=self.config.prototype.balance_weight,
+                logit_scale_init=self.config.prototype_logit_scale_init,
+                init_mode=self.config.prototype_init_mode,
+                init_scale=self.config.prototype_init_scale,
+            )
+        self.cooperative_prototype_fusion: Optional[CooperativePrototypeFusion]
+        if self.cooperative_enabled:
+            self.cooperative_prototype_fusion = CooperativePrototypeFusion(
+                weight_floor=float(self.config.cooperative_weight_floor),
+                max_share=float(self.config.cooperative_max_share),
+                evidence_mix=float(self.config.cooperative_evidence_mix),
+                confidence_mix=float(self.config.cooperative_confidence_mix),
+                agreement_mix=float(self.config.cooperative_agreement_mix),
+                logit_scale_min=float(self.config.cooperative_logit_scale_min),
+            )
+        else:
+            # Deprecated compatibility path: keep joint-only route when cooperative fusion is disabled.
+            self.cooperative_prototype_fusion = None
         self.prototype_head = self.joint_prototype_head
         # Compatibility alias for legacy tests and callback assumptions.
         self.prototype_bank = self.prototype_head
@@ -538,33 +662,136 @@ class Model(nn.Module):
             top_t=self.config.prototype_card_top_t,
             max_members=self.config.diagnostics_max_members,
         )
-        self.transparent_backbone = None
-        self.transparent_feature_dim = 0
-        self.transparent_feature_names: list[str] = []
         if self.config.transparent_backbone_enabled:
-            transparent_args = self._build_transparent_backbone_args()
-            self.transparent_backbone = TSPNBackbone(transparent_args, metadata)
-            self.transparent_feature_dim = int(self.transparent_backbone.channel_for_classifier)
-            self.transparent_feature_norm = nn.LayerNorm(self.transparent_feature_dim)
-            self.transparent_feature_proj = nn.Linear(
-                self.transparent_feature_dim,
+            transparent_time_args = self._build_transparent_backbone_args(branch="time")
+            transparent_freq_args = self._build_transparent_backbone_args(branch="freq")
+            self.transparent_time_backbone = TransparentGlobalBackbone(transparent_time_args)
+            self.transparent_freq_backbone = TransparentGlobalBackbone(transparent_freq_args)
+            # Legacy compatibility alias.
+            self.transparent_backbone = self.transparent_time_backbone
+
+            self.transparent_time_feature_dim = int(self.transparent_time_backbone.channel_for_classifier)
+            self.transparent_freq_feature_dim = int(self.transparent_freq_backbone.channel_for_classifier)
+            self.transparent_feature_dim = int(
+                self.transparent_time_feature_dim + self.transparent_freq_feature_dim
+            )
+            self.transparent_time_feature_norm = nn.LayerNorm(self.transparent_time_feature_dim)
+            self.transparent_time_feature_proj = nn.Linear(
+                self.transparent_time_feature_dim,
                 self.config.concept_dim,
                 bias=False,
             )
-            self.transparent_feature_names = self._build_transparent_feature_names(
+            self.transparent_freq_feature_norm = nn.LayerNorm(self.transparent_freq_feature_dim)
+            self.transparent_freq_feature_proj = nn.Linear(
+                self.transparent_freq_feature_dim,
+                self.config.concept_dim,
+                bias=False,
+            )
+            self.transparent_time_to_role = nn.Linear(self.config.concept_dim, self.config.role_dim, bias=False)
+            self.transparent_freq_to_role = nn.Linear(self.config.concept_dim, self.config.role_dim, bias=False)
+            projection_init_mode = str(self.config.transparent_projection_init_mode)
+            if projection_init_mode != "random_normal":
+                self._init_transparent_projection_with_dct(projection_init_mode)
+            if bool(getattr(self.config, "transparent_time_dual_basis_enabled", False)):
+                basis_args = self._build_transparent_backbone_args(branch="time")
+                basis_args.deterministic_init = True
+                self.transparent_time_basis_backbone = TransparentGlobalBackbone(basis_args)
+                self.transparent_time_basis_feature_norm = nn.LayerNorm(self.transparent_time_feature_dim)
+                self.transparent_time_basis_feature_proj = nn.Linear(
+                    self.transparent_time_feature_dim,
+                    self.config.concept_dim,
+                    bias=False,
+                )
+                self.transparent_time_basis_to_role = nn.Linear(
+                    self.config.concept_dim,
+                    self.config.role_dim,
+                    bias=False,
+                )
+                self._init_linear_from_dct(self.transparent_time_basis_feature_proj)
+                self._init_linear_from_dct(self.transparent_time_basis_to_role)
+                self.transparent_time_basis_mix_logit = nn.Parameter(torch.zeros(()))
+            self.transparent_time_feature_names = self._build_transparent_feature_names(
                 feature_names=self.config.transparent_backbone_features,
-                channels_per_feature=int(self.transparent_backbone.channel_for_feature),
+                channels_per_feature=int(self.transparent_time_backbone.channel_for_feature),
+            )
+            self.transparent_freq_feature_names = self._build_transparent_feature_names(
+                feature_names=self.config.transparent_backbone_freq_features,
+                channels_per_feature=int(self.transparent_freq_backbone.channel_for_feature),
+            )
+            self.transparent_feature_names = (
+                [f"time.{name}" for name in self.transparent_time_feature_names]
+                + [f"freq.{name}" for name in self.transparent_freq_feature_names]
             )
             self.active_component_summary["transparent_backbone"] = {
                 "enabled": True,
-                "branches": ["joint"],
-                "layers": int(self.config.transparent_backbone_layers),
-                "modules": list(self.config.transparent_backbone_modules),
-                "features": list(self.config.transparent_backbone_features),
+                "mode": "dual_deep_global_tf",
+                "branches": ["time_global_deep", "freq_global_deep"],
+                "time": {
+                    "layers": int(self.config.transparent_backbone_layers),
+                    "modules": list(self.config.transparent_backbone_modules),
+                    "features": list(self.config.transparent_backbone_features),
+                    "deterministic_init": bool(
+                        self.config.transparent_backbone_time_deterministic_init
+                        if self.config.transparent_backbone_time_deterministic_init is not None
+                        else self.config.transparent_backbone_deterministic_init
+                    ),
+                    "feature_norm": str(self.config.transparent_backbone_feature_norm),
+                    "projection_init": str(self.config.transparent_projection_init_mode),
+                    "dual_basis_enabled": bool(
+                        getattr(self.config, "transparent_time_dual_basis_enabled", False)
+                    ),
+                    "feature_dim": int(self.transparent_time_feature_dim),
+                },
+                "freq": {
+                    "layers": int(self.config.transparent_backbone_layers),
+                    "modules": list(self.config.transparent_backbone_freq_modules),
+                    "features": list(self.config.transparent_backbone_freq_features),
+                    "deterministic_init": bool(
+                        self.config.transparent_backbone_freq_deterministic_init
+                        if self.config.transparent_backbone_freq_deterministic_init is not None
+                        else self.config.transparent_backbone_deterministic_init
+                    ),
+                    "feature_norm": str(self.config.transparent_backbone_feature_norm),
+                    "projection_init": str(self.config.transparent_projection_init_mode),
+                    "feature_dim": int(self.transparent_freq_feature_dim),
+                },
                 "feature_dim": int(self.transparent_feature_dim),
             }
         else:
             self.active_component_summary["transparent_backbone"] = {"enabled": False}
+
+    @staticmethod
+    def _init_linear_from_dct(linear: nn.Linear) -> None:
+        basis = EvidenceRoleCompression._build_dct_basis(
+            in_features=int(linear.in_features),
+            role_dim=int(linear.out_features),
+        ).transpose(0, 1)
+        with torch.no_grad():
+            linear.weight.copy_(basis.to(device=linear.weight.device, dtype=linear.weight.dtype))
+
+    def _init_transparent_projection_with_dct(self, mode: str) -> None:
+        if mode == "dct":
+            modules = [
+                self.transparent_time_feature_proj,
+                self.transparent_freq_feature_proj,
+                self.transparent_time_to_role,
+                self.transparent_freq_to_role,
+            ]
+        elif mode == "dct_feature":
+            modules = [
+                self.transparent_time_feature_proj,
+                self.transparent_freq_feature_proj,
+            ]
+        elif mode == "dct_to_role":
+            modules = [
+                self.transparent_time_to_role,
+                self.transparent_freq_to_role,
+            ]
+        else:
+            raise ValueError(f"Unsupported transparent_projection_init_mode={mode!r}.")
+        for module in modules:
+            if module is not None:
+                self._init_linear_from_dct(module)
 
     def _feature_mask_on(self, device: torch.device) -> torch.Tensor:
         return self.feature_mask.to(device=device)
@@ -671,18 +898,6 @@ class Model(nn.Module):
         if not self.residual_enabled:
             return
         residual_init_mode = str(self.config.classifier.residual_init)
-        deterministic_default_modes = {
-            "global_feature",
-            "semantic_stats",
-            "local_anomaly_summary",
-            "local_anomaly_profile",
-        }
-        if (
-            residual_init_mode == "default"
-            and self.raw_feature_residual_lowrank_proj is None
-            and self.residual_input_mode in deterministic_default_modes
-        ):
-            residual_init_mode = "feature_hash"
         # Legacy-compatible behavior:
         # For simple one-layer residual branches, keep PyTorch Linear default init.
         # Historical high-performing runs follow this path.
@@ -714,6 +929,11 @@ class Model(nn.Module):
             with torch.no_grad():
                 projected = self._projected_raw_global_init_weight(self.raw_feature_residual_proj.weight)
                 self.raw_feature_residual_proj.weight.copy_(projected)
+        elif residual_init_mode == "zero" and self.raw_feature_residual_lowrank_proj is None:
+            with torch.no_grad():
+                self.raw_feature_residual_proj.weight.zero_()
+        elif residual_init_mode == "dct" and self.raw_feature_residual_lowrank_proj is None:
+            self._init_linear_from_dct(self.raw_feature_residual_proj)
         elif residual_init_mode == "feature_hash" and self.raw_feature_residual_lowrank_proj is None:
             with torch.no_grad():
                 hashed = self._feature_hash_init_weight(
@@ -761,6 +981,7 @@ class Model(nn.Module):
         else:
             nn.init.xavier_uniform_(self.raw_feature_residual_proj.weight, gain=0.5)
 
+
     def _should_use_eval_mc(self) -> bool:
         return (
             (not self.training)
@@ -774,13 +995,30 @@ class Model(nn.Module):
     def _should_use_region_ensemble(self) -> bool:
         return int(self.config.region_ensemble_samples) > 1
 
-    def _build_transparent_backbone_args(self) -> SimpleNamespace:
+    def _build_transparent_backbone_args(self, branch: str = "time") -> SimpleNamespace:
+        if str(branch) == "freq":
+            module_names = list(self.config.transparent_backbone_freq_modules)
+            feature_names = list(self.config.transparent_backbone_freq_features)
+        else:
+            module_names = list(self.config.transparent_backbone_modules)
+            feature_names = list(self.config.transparent_backbone_features)
+        feature_norm_mode = str(self.config.transparent_backbone_feature_norm)
+        feature_norm_eps = float(self.config.transparent_backbone_feature_norm_eps)
+        # Keep backward-compatible epsilon for the legacy running-stat normalizer.
+        if feature_norm_mode == "legacy_running" and feature_norm_eps < 1e-3:
+            feature_norm_eps = 0.1
         signal_processing_configs = {
-            f"layer{layer_idx + 1}": list(self.config.transparent_backbone_modules)
+            f"layer{layer_idx + 1}": module_names
             for layer_idx in range(int(self.config.transparent_backbone_layers))
         }
+        if str(branch) == "freq":
+            deterministic_init = self.config.transparent_backbone_freq_deterministic_init
+        else:
+            deterministic_init = self.config.transparent_backbone_time_deterministic_init
+        if deterministic_init is None:
+            deterministic_init = bool(self.config.transparent_backbone_deterministic_init)
         return SimpleNamespace(
-            name="TSPN",
+            name="TransparentGlobalBackbone",
             type="X_model",
             device=str(self.config.device),
             in_dim=int(self.config.input_length),
@@ -789,8 +1027,11 @@ class Model(nn.Module):
             out_channels=int(self.config.transparent_backbone_out_channels),
             scale=int(self.config.transparent_backbone_scale),
             skip_connection=bool(self.config.transparent_backbone_skip_connection),
+            deterministic_init=bool(deterministic_init),
+            feature_norm_mode=feature_norm_mode,
+            feature_norm_eps=feature_norm_eps,
             signal_processing_configs=signal_processing_configs,
-            feature_extractor_configs=list(self.config.transparent_backbone_features),
+            feature_extractor_configs=feature_names,
             num_classes=self.config.num_classes,
             f_c_mu=0.0,
             f_c_sigma=0.1,
@@ -906,6 +1147,34 @@ class Model(nn.Module):
         residual = self.semantic_tokens_residual_proj(pooled)
         return torch.nan_to_num(residual), torch.nan_to_num(attn_weights)
 
+    def _semantic_tokens_query_forward(
+        self,
+        semantic_coord_tokens: torch.Tensor,
+        h_core: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if (
+            self.semantic_tokens_attn_norm is None
+            or self.semantic_tokens_attn_proj is None
+            or self.semantic_tokens_query_proj is None
+            or self.semantic_tokens_key_proj is None
+            or self.semantic_tokens_value_proj is None
+            or self.semantic_tokens_out_norm is None
+            or self.semantic_tokens_residual_proj is None
+        ):
+            raise RuntimeError("semantic_tokens_query residual modules are not initialized.")
+        tokens = self.semantic_tokens_attn_norm(semantic_coord_tokens)
+        tokens = F.gelu(self.semantic_tokens_attn_proj(tokens))
+        query = self.semantic_tokens_query_proj(h_core).unsqueeze(1)
+        key = self.semantic_tokens_key_proj(tokens)
+        value = self.semantic_tokens_value_proj(tokens)
+        scale = math.sqrt(float(max(int(key.shape[-1]), 1)))
+        attn_logits = torch.sum(query * key, dim=-1) / scale
+        attn_weights = torch.softmax(attn_logits, dim=-1)
+        pooled = torch.sum(attn_weights.unsqueeze(-1) * value, dim=1)
+        pooled = self.semantic_tokens_out_norm(pooled)
+        residual = self.semantic_tokens_residual_proj(pooled)
+        return torch.nan_to_num(residual), torch.nan_to_num(attn_weights)
+
     @staticmethod
     def _apply_operator_bank_on_regions(
         regions_bcrw: torch.Tensor,
@@ -930,11 +1199,28 @@ class Model(nn.Module):
     ) -> torch.Tensor:
         if backbone is None:
             raise RuntimeError("Transparent backbone is not enabled.")
+        if hasattr(backbone, "extract_features"):
+            return backbone.extract_features(x)
         hidden = x
         for layer in backbone.signal_processing_layers:
             hidden = layer(hidden)
         hidden = backbone.feature_extractor_layers(hidden)
         return hidden.view(hidden.shape[0], -1)
+
+    def _build_transparent_backbone_input(
+        self,
+        x: torch.Tensor,
+        branch: str,
+    ) -> torch.Tensor:
+        if str(branch) == "time":
+            return x
+        if str(branch) == "freq":
+            x_bcl = to_bcl(x)
+            # Frequency branch uses amplitude spectrum semantics; enhancement and
+            # indicator extraction are handled by frequency-specific backbone modules/features.
+            x_freq = safe_rfft_amplitude(x_bcl)
+            return x_freq.permute(0, 2, 1).contiguous()
+        raise ValueError(f"Unsupported transparent backbone branch: {branch!r}.")
 
     @staticmethod
     def _to_tensor_ids(file_ids_raw: Any, device: torch.device) -> torch.Tensor:
@@ -1056,6 +1342,12 @@ class Model(nn.Module):
                 h_core,
             )
             residual_details["semantic_coord_attention"] = semantic_token_attention.unsqueeze(1)
+        elif residual_input == "semantic_tokens_query":
+            residual, semantic_token_attention = self._semantic_tokens_query_forward(
+                h_raw_semantic_coord_tokens,
+                h_core,
+            )
+            residual_details["semantic_coord_attention"] = semantic_token_attention.unsqueeze(1)
         else:
             if self.raw_feature_residual_norm is None or self.raw_feature_residual_proj is None:
                 return h_core, h_core.new_zeros(h_core.shape), residual_details
@@ -1124,20 +1416,29 @@ class Model(nn.Module):
         x: torch.Tensor,
         file_ids: torch.Tensor | None = None,
         sampling_pass: int = 0,
+        time_patch_width_override: int | None = None,
     ) -> Dict[str, torch.Tensor]:
         x_bcl = to_bcl(x)
         sampling_mode = str(getattr(self.config, "region_sampling_mode", "global_random"))
         runtime_epoch = int(getattr(self, "runtime_epoch", 0))
-        sampling_epoch = runtime_epoch + max(int(sampling_pass), 0) * 9973
+        # Keep training stochastic while freezing val/test partitioning to a fixed
+        # per-sample hash basis, so val_total_loss is comparable across epochs.
+        base_sampling_epoch = runtime_epoch if self.training else 0
+        sampling_epoch = base_sampling_epoch + max(int(sampling_pass), 0) * 9973
         sample_keys = None
-        if sampling_mode == "sample_epoch_hash" and file_ids is not None:
+        if file_ids is not None and (sampling_mode == "sample_epoch_hash" or (not self.training)):
             sample_keys = self._build_region_sampling_keys(x_bcl=x_bcl, file_ids=file_ids)
+        effective_time_patch_width = (
+            time_patch_width_override
+            if time_patch_width_override is not None
+            else self.config.time_patch_width
+        )
         raw_time_patches, time_patch_starts = make_time_patches(
             x_bcl.unsqueeze(2),
             self.config.time_patch_count,
             self.config.padding_mode,
             patch_mode=self.config.time_patch_mode,
-            patch_width=self.config.time_patch_width,
+            patch_width=effective_time_patch_width,
             sample_keys=sample_keys,
             sampling_epoch=sampling_epoch,
             sampling_seed_offset=int(self.config.region_sampling_seed_offset),
@@ -1372,6 +1673,11 @@ class Model(nn.Module):
     ) -> torch.Tensor:
         device = hierarchical["time_focus"].device
         dtype = hierarchical["time_focus"].dtype
+        if not self.cooperative_enabled:
+            batch_size = int(hierarchical["time_focus"].shape[0])
+            weights = torch.zeros((batch_size, 3), device=device, dtype=dtype)
+            weights[:, 2] = 1.0
+            return weights
         quality_time = (
             hierarchical["time_focus"] * hierarchical["time_agreement"]
         ).clamp_min(1e-4)
@@ -1398,6 +1704,47 @@ class Model(nn.Module):
         return torch.nan_to_num(weights, nan=1.0 / float(weights.shape[1]))
 
     @staticmethod
+    def _local_global_anomaly_weights(
+        local_roles: torch.Tensor,
+        global_role: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Select local regions that deviate from the full-range global evidence."""
+        local_norm = F.layer_norm(local_roles, (int(local_roles.shape[-1]),))
+        global_norm = F.layer_norm(global_role, (int(global_role.shape[-1]),)).unsqueeze(1)
+        anomaly = (local_norm - global_norm).pow(2).mean(dim=-1)
+        anomaly = (anomaly - anomaly.mean(dim=1, keepdim=True)) / anomaly.std(
+            dim=1,
+            keepdim=True,
+            unbiased=False,
+        ).clamp_min(1e-6)
+        weights = torch.softmax(anomaly, dim=1)
+        return weights, anomaly
+
+    @staticmethod
+    def _combine_cross_and_anomaly_weights(
+        cross_weights: torch.Tensor,
+        anomaly_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        """Use sample-internal abnormality as the local explanation coordinate.
+
+        Cross-consistency still builds the main local/global summary. The local
+        anomaly route is different: it must point to the patch or band that
+        deviates from the full-range evidence, otherwise a near-uniform cross
+        distribution suppresses the very evidence this branch is meant to expose.
+        """
+        del cross_weights
+        return anomaly_weights / anomaly_weights.sum(dim=1, keepdim=True).clamp_min(1e-6)
+
+    @staticmethod
+    def _build_local_concept(
+        g_t_local: torch.Tensor,
+        g_f_local: torch.Tensor,
+    ) -> torch.Tensor:
+        g_t = F.layer_norm(g_t_local, (int(g_t_local.shape[-1]),))
+        g_f = F.layer_norm(g_f_local, (int(g_f_local.shape[-1]),))
+        return torch.cat([g_t, g_f, g_t * g_f, (g_t - g_f).abs()], dim=-1)
+
+    @staticmethod
     def _mean_kl_to_target(logits: torch.Tensor, target_probs: torch.Tensor) -> torch.Tensor:
         log_probs = F.log_softmax(logits, dim=-1)
         return F.kl_div(log_probs, target_probs, reduction="batchmean")
@@ -1410,14 +1757,32 @@ class Model(nn.Module):
         head_key: str,
         update_enabled: bool,
         prefix: str,
+        anchor_concept: Optional[torch.Tensor] = None,
+        alternative_anchor_concept: Optional[torch.Tensor] = None,
+        anchor_mix_mode: str = "adaptive_margin",
+        residual_logit_weight: Optional[torch.Tensor] = None,
+        routing_concept: Optional[torch.Tensor] = None,
+        candidate_competition: bool = False,
     ) -> Dict[str, torch.Tensor]:
         concept = torch.nan_to_num(concept)
+        if anchor_concept is not None:
+            anchor_concept = torch.nan_to_num(anchor_concept)
+        if alternative_anchor_concept is not None:
+            alternative_anchor_concept = torch.nan_to_num(alternative_anchor_concept)
+        if routing_concept is not None:
+            routing_concept = torch.nan_to_num(routing_concept)
         proto_out = head(
             concept,
             labels=labels,
             head_key=head_key,
             assignment_enabled=self.config.prototype_assignment_enabled,
             update_enabled=bool(update_enabled),
+            anchor_h=anchor_concept,
+            alternative_anchor_h=alternative_anchor_concept,
+            anchor_mix_mode=anchor_mix_mode,
+            residual_logit_weight=residual_logit_weight,
+            routing_h=routing_concept,
+            candidate_competition=bool(candidate_competition),
         )
         return {f"{prefix}_{key}": value for key, value in proto_out.items()}
 
@@ -1482,7 +1847,7 @@ class Model(nn.Module):
         contrastive_scores = extras[proto_scores_key]
         if use_scaled_scores:
             target_proto_scores = extras.get(target_proto_scores_key)
-            target_proto_probs = None
+            target_proto_probs = extras.get(target_proto_probs_key)
         else:
             target_proto_scores = extras.get(
                 target_proto_scores_routed_key,
@@ -1533,17 +1898,132 @@ class Model(nn.Module):
         contrastive["lambda_schedule"] = reference.new_tensor(1.0)
         return contrastive
 
+    @staticmethod
+    def _mean_true_vs_best_negative_margin(
+        scores: torch.Tensor,
+        labels: torch.Tensor,
+    ) -> torch.Tensor:
+        labels = labels.to(scores.device).long()
+        true_scores = scores.gather(1, labels.view(-1, 1)).squeeze(1)
+        class_mask = F.one_hot(labels, num_classes=scores.shape[1]).to(torch.bool)
+        negative_scores = scores.masked_fill(class_mask, torch.finfo(scores.dtype).min)
+        best_negative = negative_scores.max(dim=1).values
+        return (true_scores - best_negative).mean()
+
+    def _attach_decision_diagnostics(
+        self,
+        metrics: Dict[str, torch.Tensor],
+        extras: Dict[str, Any],
+        labels: torch.Tensor,
+    ) -> None:
+        """Attach scalar decision-path diagnostics without changing the loss."""
+        logits = extras.get("logits")
+        if not torch.is_tensor(logits):
+            return
+        labels = labels.to(logits.device).long()
+        final_pred = logits.argmax(dim=1)
+        metrics["decision_logit_margin"] = self._mean_true_vs_best_negative_margin(
+            logits,
+            labels,
+        )
+
+        anchor_scores = extras.get("anchor_scores")
+        if torch.is_tensor(anchor_scores):
+            anchor_scores = anchor_scores.to(logits.device)
+            anchor_pred = anchor_scores.argmax(dim=1)
+            anchor_correct = anchor_pred.eq(labels)
+            final_correct = final_pred.eq(labels)
+            metrics["decision_anchor_acc"] = anchor_correct.float().mean()
+            metrics["decision_anchor_margin"] = self._mean_true_vs_best_negative_margin(
+                anchor_scores,
+                labels,
+            )
+            metrics["decision_anchor_final_disagree"] = anchor_pred.ne(final_pred).float().mean()
+            metrics["decision_anchor_correct_final_wrong"] = (
+                anchor_correct & ~final_correct
+            ).float().mean()
+            metrics["decision_anchor_wrong_final_correct"] = (
+                ~anchor_correct & final_correct
+            ).float().mean()
+
+        residual_scores = extras.get("pooled_residual_scores")
+        if torch.is_tensor(residual_scores):
+            residual_scores = residual_scores.to(logits.device)
+            residual_pred = residual_scores.argmax(dim=1)
+            metrics["decision_residual_acc"] = residual_pred.eq(labels).float().mean()
+            metrics["decision_residual_margin"] = self._mean_true_vs_best_negative_margin(
+                residual_scores,
+                labels,
+            )
+
+        target_proto_probs = extras.get("target_proto_probs")
+        if torch.is_tensor(target_proto_probs):
+            probs = target_proto_probs.to(logits.device).clamp_min(1e-8)
+            entropy = -(probs * probs.log()).sum(dim=-1)
+            if probs.shape[-1] > 1:
+                entropy = entropy / torch.log(
+                    probs.new_tensor(float(probs.shape[-1]))
+                ).clamp_min(1e-8)
+            metrics["prototype_assignment_entropy"] = entropy.mean()
+            metrics["prototype_assignment_top_prob"] = probs.max(dim=-1).values.mean()
+
+        target_proto_routing_scores = extras.get("target_proto_routing_scores")
+        if torch.is_tensor(target_proto_routing_scores):
+            routed = target_proto_routing_scores.to(logits.device)
+            if routed.shape[-1] > 1:
+                top2 = routed.topk(k=2, dim=-1).values
+                metrics["prototype_assignment_margin"] = (top2[:, 0] - top2[:, 1]).mean()
+        for metric_name in (
+            "time_focus",
+            "freq_focus",
+            "time_agreement",
+            "freq_agreement",
+            "anomaly_gate",
+            "local_global_disagreement",
+            "anomaly_alignment_gate",
+            "h_global_deep_gate",
+            "transparent_time_basis_mix",
+        ):
+            value = extras.get(metric_name)
+            if torch.is_tensor(value):
+                metrics[f"evidence_{metric_name}"] = value.to(logits.device).mean()
+        anchor_path_weights = extras.get("anchor_path_weights")
+        if torch.is_tensor(anchor_path_weights) and anchor_path_weights.shape[-1] >= 2:
+            weights = anchor_path_weights.to(logits.device)
+            metrics["decision_anchor_global_weight"] = weights[:, 0].mean()
+            metrics["decision_anchor_fused_weight"] = weights[:, 1].mean()
+        anchor_residual_path_weights = extras.get("anchor_residual_path_weights")
+        if (
+            torch.is_tensor(anchor_residual_path_weights)
+            and anchor_residual_path_weights.shape[-1] >= 2
+        ):
+            weights = anchor_residual_path_weights.to(logits.device)
+            metrics["decision_anchor_evidence_weight"] = weights[:, 0].mean()
+            metrics["decision_residual_evidence_weight"] = weights[:, 1].mean()
+        evidence_path_weights = extras.get("evidence_path_weights")
+        if torch.is_tensor(evidence_path_weights) and evidence_path_weights.shape[-1] >= 2:
+            weights = evidence_path_weights.to(logits.device)
+            metrics["decision_primary_evidence_weight"] = weights[:, 0].mean()
+            metrics["decision_relative_evidence_weight"] = weights[:, 1].mean()
+        residual_anchor_support_gate = extras.get("residual_anchor_support_gate")
+        if torch.is_tensor(residual_anchor_support_gate):
+            metrics["decision_residual_anchor_support_gate"] = (
+                residual_anchor_support_gate.to(logits.device).mean()
+            )
+
     def _encode_structured(
         self,
         x: torch.Tensor,
         file_ids_raw: Any,
         sampling_pass: int = 0,
+        time_patch_width_override: int | None = None,
     ) -> Dict[str, Any]:
         file_ids = self._to_tensor_ids(file_ids_raw, x.device)
         feature_tensors = self._extract_feature_tensors(
             x,
             file_ids=file_ids,
             sampling_pass=sampling_pass,
+            time_patch_width_override=time_patch_width_override,
         )
         h_raw_full = feature_tensors["h_raw_full"]
         h_raw_struct_masked = feature_tensors["h_raw_struct_masked"]
@@ -1557,19 +2037,239 @@ class Model(nn.Module):
 
         e_t_local_bar, alpha_t = self.time_channel_fusion(feature_tensors["E_t_local_flat"])
         e_f_local_bar, alpha_f = self.freq_channel_fusion(feature_tensors["E_f_local_flat"])
-        z_t_local, a_t = self.time_role_compression(e_t_local_bar)
-        z_f_local, a_f = self.freq_role_compression(e_f_local_bar)
-        h_local_core, s, w_t, w_f, g_t_local, g_f_local = self.cross_evidence_pooling(
-            z_t_local,
-            z_f_local,
+
+        # Structured Evidence Dropout: during training, randomly zero out entire
+        # patches (time) or bands (freq) so the model learns to diagnose from
+        # partial evidence.  This improves domain generalization because the model
+        # cannot over-rely on any single evidence pathway that may be unreliable
+        # in an unseen domain.  Interpretation: "a robust diagnosis uses multiple
+        # independent evidence pathways; the model should still work when some are
+        # missing."
+        if self.training and self.config.evidence_dropout_rate > 0.0:
+            rate = self.config.evidence_dropout_rate
+            B, P, M = e_t_local_bar.shape
+            patch_keep = torch.bernoulli(
+                e_t_local_bar.new_full((B, P, 1), 1.0 - rate)
+            )
+            e_t_local_bar = e_t_local_bar * patch_keep
+            Bf, Pf, Mf = e_f_local_bar.shape
+            band_keep = torch.bernoulli(
+                e_f_local_bar.new_full((Bf, Pf, 1), 1.0 - rate)
+            )
+            e_f_local_bar = e_f_local_bar * band_keep
+
+        # Multi-granularity: during training, randomly select ONE patch width per
+        # forward pass so the model learns scale-invariant role representations.
+        # During inference the primary width is used; multi-scale logit ensembling
+        # is handled at the forward() level.
+        if self.time_patch_widths is not None and self.training:
+            all_widths = [self.config.time_patch_width] + list(self.time_patch_widths)
+            pw_idx = torch.randint(0, len(all_widths), (1,)).item()
+            selected_pw = all_widths[pw_idx]
+            if selected_pw != self.config.time_patch_width:
+                feature_tensors = self._extract_feature_tensors(
+                    x,
+                    file_ids=file_ids,
+                    sampling_pass=sampling_pass,
+                    time_patch_width_override=selected_pw,
+                )
+                e_t_local_bar, alpha_t = self.time_channel_fusion(feature_tensors["E_t_local_flat"])
+
+        e_t_local_anomaly_bar = e_t_local_bar
+        e_f_local_anomaly_bar = e_f_local_bar
+        e_t_local_main_bar = e_t_local_bar
+        e_f_local_main_bar = e_f_local_bar
+        if bool(getattr(self.config, "cross_patch_norm_enabled", False)):
+            scope = str(getattr(self.config, "cross_patch_norm_scope", "anomaly"))
+            cp_mean_t = e_t_local_bar.mean(dim=1, keepdim=True)
+            cp_std_t = e_t_local_bar.std(dim=1, keepdim=True).clamp_min(1e-6)
+            e_t_local_anomaly_bar = (e_t_local_bar - cp_mean_t) / cp_std_t
+            cp_mean_f = e_f_local_bar.mean(dim=1, keepdim=True)
+            cp_std_f = e_f_local_bar.std(dim=1, keepdim=True).clamp_min(1e-6)
+            e_f_local_anomaly_bar = (e_f_local_bar - cp_mean_f) / cp_std_f
+            # Scope controls only the main local summary path.  The anomaly path
+            # always uses relative evidence when enabled, so prototype
+            # explanations can point to sample-internal abnormal patches/bands.
+            if scope in {"time", "both"}:
+                e_t_local_main_bar = e_t_local_anomaly_bar
+            if scope in {"freq", "both"}:
+                e_f_local_main_bar = e_f_local_anomaly_bar
+
+        z_t_local, a_t = self.time_role_compression(e_t_local_main_bar)
+        z_f_local, a_f = self.freq_role_compression(e_f_local_main_bar)
+        z_t_local_anomaly, _ = self.time_role_compression(e_t_local_anomaly_bar)
+        z_f_local_anomaly, _ = self.freq_role_compression(e_f_local_anomaly_bar)
+        h_local_core, s, w_t_cross, w_f_cross, g_t_local_cross, g_f_local_cross = (
+            self.cross_evidence_pooling(
+                z_t_local,
+                z_f_local,
+            )
         )
 
         e_t_global_bar, alpha_t_global = self.time_channel_fusion(feature_tensors["E_t_global_flat"])
         e_f_global_bar, alpha_f_global = self.freq_channel_fusion(feature_tensors["E_f_global_flat"])
         z_t_global_seq, a_t_global = self.time_role_compression(e_t_global_bar)
         z_f_global_seq, a_f_global = self.freq_role_compression(e_f_global_bar)
-        g_t_global = z_t_global_seq.squeeze(1)
-        g_f_global = z_f_global_seq.squeeze(1)
+        g_t_global_structured = z_t_global_seq.squeeze(1)
+        g_f_global_structured = z_f_global_seq.squeeze(1)
+        structured_global_enabled = bool(self.config.structured_global_enabled)
+        g_t_global = g_t_global_structured
+        g_f_global = g_f_global_structured
+
+        h_transparent_raw = None
+        h_transparent_time_raw = None
+        h_transparent_freq_raw = None
+        h_transparent = g_t_global.new_zeros((g_t_global.shape[0], int(self.config.concept_dim)))
+        h_transparent_time = h_transparent.new_zeros(h_transparent.shape)
+        h_transparent_freq = h_transparent.new_zeros(h_transparent.shape)
+        h_transparent_mix = h_transparent.new_zeros(h_transparent.shape)
+        transparent_mix_weights = h_transparent.new_zeros((h_transparent.shape[0], 3))
+        transparent_time_role = g_t_global.new_zeros(g_t_global.shape)
+        transparent_freq_role = g_f_global.new_zeros(g_f_global.shape)
+        transparent_time_gate = g_t_global.new_zeros((g_t_global.shape[0], 1))
+        transparent_freq_gate = g_f_global.new_zeros((g_f_global.shape[0], 1))
+        transparent_time_basis_mix = g_t_global.new_zeros((g_t_global.shape[0], 1))
+        if (
+            self.transparent_time_backbone is not None
+            and self.transparent_freq_backbone is not None
+            and self.config.transparent_backbone_weight > 0.0
+            and self.transparent_time_feature_norm is not None
+            and self.transparent_time_feature_proj is not None
+            and self.transparent_freq_feature_norm is not None
+            and self.transparent_freq_feature_proj is not None
+            and self.transparent_time_to_role is not None
+            and self.transparent_freq_to_role is not None
+        ):
+            x_transparent_time = self._build_transparent_backbone_input(x, branch="time")
+            x_transparent_freq = self._build_transparent_backbone_input(x, branch="freq")
+            h_transparent_time_raw = self._extract_transparent_backbone_features(
+                self.transparent_time_backbone,
+                x_transparent_time,
+            )
+            h_transparent_freq_raw = self._extract_transparent_backbone_features(
+                self.transparent_freq_backbone,
+                x_transparent_freq,
+            )
+            h_transparent_raw = torch.cat([h_transparent_time_raw, h_transparent_freq_raw], dim=-1)
+            h_transparent_time = self.transparent_time_feature_proj(
+                self.transparent_time_feature_norm(h_transparent_time_raw)
+            )
+            h_transparent_freq = self.transparent_freq_feature_proj(
+                self.transparent_freq_feature_norm(h_transparent_freq_raw)
+            )
+            transparent_time_role = self.transparent_time_to_role(h_transparent_time)
+            transparent_freq_role = self.transparent_freq_to_role(h_transparent_freq)
+            if (
+                self.transparent_time_basis_backbone is not None
+                and self.transparent_time_basis_feature_norm is not None
+                and self.transparent_time_basis_feature_proj is not None
+                and self.transparent_time_basis_to_role is not None
+                and self.transparent_time_basis_mix_logit is not None
+            ):
+                h_time_basis_raw = self._extract_transparent_backbone_features(
+                    self.transparent_time_basis_backbone,
+                    x_transparent_time,
+                )
+                h_time_basis = self.transparent_time_basis_feature_proj(
+                    self.transparent_time_basis_feature_norm(h_time_basis_raw)
+                )
+                time_basis_role = self.transparent_time_basis_to_role(h_time_basis)
+                mix = torch.sigmoid(self.transparent_time_basis_mix_logit).to(
+                    device=h_transparent_time.device,
+                    dtype=h_transparent_time.dtype,
+                )
+                transparent_time_basis_mix = mix.expand(h_transparent_time.shape[0], 1)
+                h_transparent_time = (
+                    (1.0 - transparent_time_basis_mix) * h_transparent_time
+                    + transparent_time_basis_mix * h_time_basis
+                )
+                transparent_time_role = (
+                    (1.0 - transparent_time_basis_mix) * transparent_time_role
+                    + transparent_time_basis_mix * time_basis_role
+                )
+            h_transparent = 0.5 * (h_transparent_time + h_transparent_freq)
+            h_transparent_mix = h_transparent
+            if structured_global_enabled:
+                # Clean global semantic chain:
+                # Use one fixed semantic coordinate for global evidence.
+                # Deep-global and structured-global are fused by a static convex mix
+                # to reduce seed-dependent gate oscillation.
+                deep_global_weight = float(self.config.transparent_backbone_weight)
+                deep_global_weight = min(max(deep_global_weight, 0.0), 1.0)
+                transparent_time_blend = torch.full_like(transparent_time_gate, deep_global_weight)
+                transparent_freq_blend = torch.full_like(transparent_freq_gate, deep_global_weight)
+                transparent_time_gate = transparent_time_blend
+                transparent_freq_gate = transparent_freq_blend
+                g_t_global = F.layer_norm(
+                    (1.0 - transparent_time_blend) * g_t_global_structured
+                    + transparent_time_blend * transparent_time_role,
+                    (int(g_t_global.shape[-1]),),
+                )
+                g_f_global = F.layer_norm(
+                    (1.0 - transparent_freq_blend) * g_f_global_structured
+                    + transparent_freq_blend * transparent_freq_role,
+                    (int(g_f_global.shape[-1]),),
+                )
+                structured_share = torch.full_like(transparent_time_blend, 1.0 - deep_global_weight)
+                transparent_mix_weights = torch.stack(
+                    [
+                        (0.5 * transparent_time_blend).squeeze(-1),
+                        (0.5 * transparent_freq_blend).squeeze(-1),
+                        structured_share.squeeze(-1),
+                    ],
+                    dim=1,
+                )
+            else:
+                transparent_time_gate = torch.ones_like(transparent_time_gate)
+                transparent_freq_gate = torch.ones_like(transparent_freq_gate)
+                g_t_global = F.layer_norm(
+                    transparent_time_role,
+                    (int(g_t_global.shape[-1]),),
+                )
+                g_f_global = F.layer_norm(
+                    transparent_freq_role,
+                    (int(g_f_global.shape[-1]),),
+                )
+                transparent_mix_weights = torch.stack(
+                    [
+                        torch.full_like(transparent_time_gate.squeeze(-1), 0.5),
+                        torch.full_like(transparent_freq_gate.squeeze(-1), 0.5),
+                        torch.zeros_like(transparent_time_gate.squeeze(-1)),
+                    ],
+                    dim=1,
+                )
+        elif not structured_global_enabled:
+            # Structured-global is disabled but deep-global branch is unavailable.
+            # Fall back to structured-global to keep the main path numerically valid.
+            g_t_global = g_t_global_structured
+            g_f_global = g_f_global_structured
+        if structured_global_enabled and h_transparent_raw is None:
+            transparent_mix_weights = torch.stack(
+                [
+                    torch.zeros_like(transparent_time_gate.squeeze(-1)),
+                    torch.zeros_like(transparent_freq_gate.squeeze(-1)),
+                    torch.ones_like(transparent_time_gate.squeeze(-1)),
+                ],
+                dim=1,
+            )
+
+        w_t_anomaly, time_local_anomaly_logits = self._local_global_anomaly_weights(
+            z_t_local_anomaly,
+            g_t_global,
+        )
+        w_f_anomaly, freq_local_anomaly_logits = self._local_global_anomaly_weights(
+            z_f_local_anomaly,
+            g_f_global,
+        )
+        w_t_local_anomaly = self._combine_cross_and_anomaly_weights(w_t_cross, w_t_anomaly)
+        w_f_local_anomaly = self._combine_cross_and_anomaly_weights(w_f_cross, w_f_anomaly)
+        g_t_local_anomaly = torch.einsum("bp,bpr->br", w_t_local_anomaly, z_t_local_anomaly)
+        g_f_local_anomaly = torch.einsum("bf,bfr->br", w_f_local_anomaly, z_f_local_anomaly)
+        h_proto_local_raw = self._build_local_concept(g_t_local_anomaly, g_f_local_anomaly)
+        w_t = w_t_cross
+        w_f = w_f_cross
+        g_t_local = g_t_local_cross
+        g_f_local = g_f_local_cross
 
         h_hier_core, hierarchical = self.hierarchical_evidence_integration(
             g_t_local=g_t_local,
@@ -1586,21 +2286,137 @@ class Model(nn.Module):
         branch_proto_mix = self._cooperative_branch_weights(hierarchical)
         g_t = torch.nan_to_num(g_t)
         g_f = torch.nan_to_num(g_f)
-        if int(self.config.concept_dim) == 2 * int(self.config.role_dim):
-            h_core_base = torch.cat([g_t, g_f], dim=-1)
-            anomaly_source = torch.cat([g_t_local, g_f_local], dim=-1)
-            concept_source = "global_local_pair_semantic"
+        # Class anchors use only the full-range deep-global evidence; stochastic local
+        # regions are reserved for prototype residual/routing explanations.
+        g_t_anchor = torch.nan_to_num(g_t_global + self.time_role_refiner(g_t_global))
+        g_f_anchor = torch.nan_to_num(g_f_global + self.freq_role_refiner(g_f_global))
+        # Fixed semantic coordinates avoid seed-sensitive learned pair projections.
+        # Coordinates: time summary, frequency summary, T-F concordance, local/global gap.
+        h_global_pair_raw = torch.cat([g_t, g_f], dim=-1)
+        if int(self.config.concept_dim) == 4 * int(self.config.role_dim):
+            h_core_base = torch.cat(
+                [
+                    g_t,
+                    g_f,
+                    F.layer_norm(g_t * g_f, (int(g_t.shape[-1]),)),
+                    hierarchical["local_global_gap"],
+                ],
+                dim=-1,
+            )
+            h_anchor_base = torch.cat(
+                [
+                    g_t_anchor,
+                    g_f_anchor,
+                    F.layer_norm(g_t_anchor * g_f_anchor, (int(g_t_anchor.shape[-1]),)),
+                    torch.zeros_like(g_t_anchor),
+                ],
+                dim=-1,
+            )
+        elif int(self.config.concept_dim) == 2 * int(self.config.role_dim):
+            h_core_base = h_global_pair_raw
+            h_anchor_base = torch.cat([g_t_anchor, g_f_anchor], dim=-1)
         else:
-            h_core_base = torch.cat([g_t, g_f, g_t * g_f, (g_t - g_f).abs()], dim=-1)
-            anomaly_source = h_local_core
-            concept_source = "global_local_quad_semantic"
+            raise ValueError(
+                "Fixed TF concept coordinates require concept_dim to equal "
+                "2 * role_dim or 4 * role_dim."
+            )
         h_core_semantic = self.global_semantic_out(F.gelu(self.global_semantic_proj(h_core_base)))
         h_core_semantic = self.global_semantic_norm(h_core_base + h_core_semantic)
-        anomaly_residual = self.anomaly_residual_proj(self.anomaly_residual_norm(anomaly_source))
-        anomaly_focus = 0.5 * (hierarchical["time_focus"] + hierarchical["freq_focus"])
-        h_core = h_core_semantic + anomaly_focus * anomaly_residual
+        h_anchor_semantic = self.global_semantic_out(F.gelu(self.global_semantic_proj(h_anchor_base)))
+        h_anchor_semantic = self.global_semantic_norm(h_anchor_base + h_anchor_semantic)
+        h_proto_local_semantic = self.global_semantic_out(F.gelu(self.global_semantic_proj(h_proto_local_raw)))
+        h_proto_local_semantic = self.global_semantic_norm(h_proto_local_raw + h_proto_local_semantic)
+        h_relative_semantic = h_core_semantic
+        if bool(getattr(self.config, "cross_patch_norm_enabled", False)):
+            (
+                h_local_core_relative,
+                _,
+                w_t_relative,
+                w_f_relative,
+                g_t_local_relative,
+                g_f_local_relative,
+            ) = self.cross_evidence_pooling(
+                z_t_local_anomaly,
+                z_f_local_anomaly,
+            )
+            h_hier_relative, hierarchical_relative = self.hierarchical_evidence_integration(
+                g_t_local=g_t_local_relative,
+                g_f_local=g_f_local_relative,
+                g_t_global=g_t_global,
+                g_f_global=g_f_global,
+                w_t_local=w_t_relative,
+                w_f_local=w_f_relative,
+            )
+            g_t_relative = hierarchical_relative["g_t_summary"]
+            g_f_relative = hierarchical_relative["g_f_summary"]
+            g_t_relative = torch.nan_to_num(g_t_relative + self.time_role_refiner(g_t_relative))
+            g_f_relative = torch.nan_to_num(g_f_relative + self.freq_role_refiner(g_f_relative))
+            if int(self.config.concept_dim) == 4 * int(self.config.role_dim):
+                h_relative_base = torch.cat(
+                    [
+                        g_t_relative,
+                        g_f_relative,
+                        F.layer_norm(g_t_relative * g_f_relative, (int(g_t_relative.shape[-1]),)),
+                        hierarchical_relative["local_global_gap"],
+                    ],
+                    dim=-1,
+                )
+            else:
+                h_relative_base = torch.cat([g_t_relative, g_f_relative], dim=-1)
+            h_relative_semantic = self.global_semantic_out(
+                F.gelu(self.global_semantic_proj(h_relative_base))
+            )
+            h_relative_semantic = self.global_semantic_norm(h_relative_base + h_relative_semantic)
+        anomaly_source = h_local_core
+        if self.local_anomaly_residual_mode == "off":
+            anomaly_residual = torch.zeros_like(h_core_semantic)
+        elif self.local_anomaly_residual_mode == "mlp":
+            if self.anomaly_residual_proj is None:
+                raise RuntimeError("anomaly_residual_proj is required for mlp residual mode.")
+            anomaly_residual = self.anomaly_residual_proj(
+                self.anomaly_residual_norm(anomaly_source)
+            )
+        elif self.local_anomaly_residual_mode == "direct_delta":
+            if self.anomaly_residual_proj is None:
+                raise RuntimeError("anomaly_residual_proj is required for direct_delta residual mode.")
+            anomaly_direct = self.anomaly_residual_norm(anomaly_source)
+            anomaly_delta = self.anomaly_residual_proj(anomaly_direct)
+            anomaly_residual = F.layer_norm(
+                anomaly_direct + anomaly_delta,
+                (int(anomaly_direct.shape[-1]),),
+            )
+        else:
+            # Direct mode keeps local abnormal evidence in the same fixed
+            # T/F semantic coordinates as the global concept, avoiding a
+            # seed-sensitive random projection as a second decision path.
+            anomaly_residual = self.anomaly_residual_norm(anomaly_source)
+        cross_focus = 0.5 * (hierarchical["time_focus"] + hierarchical["freq_focus"])
+        anomaly_focus = 0.5 * (
+            HierarchicalEvidenceIntegration._focus(w_t_local_anomaly)
+            + HierarchicalEvidenceIntegration._focus(w_f_local_anomaly)
+        )
+        local_global_disagreement = hierarchical["local_global_gap"].abs().mean(dim=-1, keepdim=True)
+        local_global_disagreement = local_global_disagreement / (1.0 + local_global_disagreement)
+        anomaly_alignment = F.cosine_similarity(
+            h_core_semantic,
+            anomaly_residual,
+            dim=-1,
+            eps=1e-6,
+        ).unsqueeze(-1)
+        anomaly_alignment_gate = (0.5 * (anomaly_alignment + 1.0)).clamp(0.0, 1.0)
+        anomaly_gate_mode = str(getattr(self.config, "local_anomaly_gate_mode", "focus"))
+        if anomaly_gate_mode == "disagreement_aligned":
+            anomaly_gate = local_global_disagreement * anomaly_alignment_gate
+        elif anomaly_gate_mode == "disagreement":
+            anomaly_gate = local_global_disagreement
+        elif anomaly_gate_mode == "anomaly_focus":
+            anomaly_gate = anomaly_focus
+        else:
+            anomaly_gate = cross_focus
+        h_core = h_core_semantic + anomaly_gate * anomaly_residual
         h_core = F.layer_norm(h_core, (int(h_core.shape[-1]),))
         h_core = torch.nan_to_num(h_core)
+        concept_source = "fixed_tf_global_local_coordinates"
         h, h_residual, residual_details = self._concept_with_residual(
             h_core,
             h_raw_full,
@@ -1611,23 +2427,11 @@ class Model(nn.Module):
             h_raw_local_anomaly_summary,
             h_raw_local_anomaly_profile,
         )
-        h_transparent_raw = None
-        h_transparent_time_raw = None
-        h_transparent_freq_raw = None
-        h_transparent = h.new_zeros(h.shape)
-        h_transparent_time = h.new_zeros(h.shape)
-        h_transparent_freq = h.new_zeros(h.shape)
-        h_transparent_mix = h.new_zeros(h.shape)
-        transparent_mix_weights = h.new_zeros(h.shape[0], 3)
-        if self.transparent_backbone is not None and self.config.transparent_backbone_weight > 0.0:
-            h_transparent_raw = self._extract_transparent_backbone_features(self.transparent_backbone, x)
-            h_transparent = self.transparent_feature_proj(
-                self.transparent_feature_norm(h_transparent_raw)
-            )
-            h_transparent_mix = h_transparent
-            transparent_mix_weights[:, 0] = 1.0
-            h = h + float(self.config.transparent_backbone_weight) * h_transparent
         h = torch.nan_to_num(h)
+        h_global = h_core_semantic
+        h_anchor_global = torch.nan_to_num(h_anchor_semantic)
+        h_global_deep = h_transparent
+        h_global_deep_gate = 0.5 * (transparent_time_gate + transparent_freq_gate)
         extras: Dict[str, Any] = {
             "E_t": feature_tensors["time_features_masked"],
             "E_f": feature_tensors["freq_features_masked"],
@@ -1645,6 +2449,10 @@ class Model(nn.Module):
             "E_f_bar": e_f_local_bar,
             "E_t_global_bar": e_t_global_bar,
             "E_f_global_bar": e_f_global_bar,
+            "E_t_global_deep_bar": e_t_global_bar,
+            "E_f_global_deep_bar": e_f_global_bar,
+            "E_t_global_deep_gate": transparent_time_gate,
+            "E_f_global_deep_gate": transparent_freq_gate,
             "A_t": a_t,
             "A_f": a_f,
             "A_t_global": a_t_global,
@@ -1656,8 +2464,26 @@ class Model(nn.Module):
             "S": s,
             "w_t": w_t,
             "w_f": w_f,
+            "w_t_cross": w_t_cross,
+            "w_f_cross": w_f_cross,
+            "w_t_anomaly": w_t_anomaly,
+            "w_f_anomaly": w_f_anomaly,
+            "w_t_local_anomaly": w_t_local_anomaly,
+            "w_f_local_anomaly": w_f_local_anomaly,
+            "time_local_anomaly_logits": time_local_anomaly_logits,
+            "freq_local_anomaly_logits": freq_local_anomaly_logits,
+            "g_t_local_cross": g_t_local_cross,
+            "g_f_local_cross": g_f_local_cross,
+            "g_t_local_anomaly": g_t_local_anomaly,
+            "g_f_local_anomaly": g_f_local_anomaly,
             "g_t_local": g_t_local,
             "g_f_local": g_f_local,
+            "g_t_global_structured": g_t_global_structured,
+            "g_f_global_structured": g_f_global_structured,
+            "g_t_global_deep": transparent_time_role,
+            "g_f_global_deep": transparent_freq_role,
+            "g_t_global_deep_gate": transparent_time_gate,
+            "g_f_global_deep_gate": transparent_freq_gate,
             "g_t_global": g_t_global,
             "g_f_global": g_f_global,
             "g_t": g_t,
@@ -1670,12 +2496,23 @@ class Model(nn.Module):
             "freq_trust_local": hierarchical["freq_trust_local"],
             "local_global_gap": hierarchical["local_global_gap"],
             "h_local_core": h_local_core,
+            "h_proto_local": h_proto_local_semantic,
+            "h_proto_local_raw": h_proto_local_raw,
             "h_hier_core": h_hier_core,
             "h_core_base": h_core_base,
             "h_core_semantic": h_core_semantic,
+            "h_relative": h_relative_semantic,
+            "h_anchor_global": h_anchor_global,
+            "h_global_pair_raw": h_global_pair_raw,
+            "h_global": h_global,
+            "h_global_deep": h_global_deep,
+            "h_global_deep_gate": h_global_deep_gate,
             "anomaly_source": anomaly_source,
             "anomaly_residual": anomaly_residual,
             "anomaly_focus": anomaly_focus,
+            "local_global_disagreement": local_global_disagreement,
+            "anomaly_alignment_gate": anomaly_alignment_gate,
+            "anomaly_gate": anomaly_gate,
             "prototype_evidence_weights": branch_proto_mix,
             "h_core": h_core,
             "h_residual": h_residual,
@@ -1691,7 +2528,10 @@ class Model(nn.Module):
             "h_transparent_time": h_transparent_time,
             "h_transparent_freq": h_transparent_freq,
             "h_transparent_mix": h_transparent_mix,
+            "transparent_time_gate": transparent_time_gate,
+            "transparent_freq_gate": transparent_freq_gate,
             "transparent_mix_weights": transparent_mix_weights,
+            "transparent_time_basis_mix": transparent_time_basis_mix,
             "transparent_feature_names": self.transparent_feature_names,
             "h": h,
             "c": h,
@@ -1720,16 +2560,186 @@ class Model(nn.Module):
     ) -> Dict[str, Any]:
         if update_enabled is None:
             update_enabled = bool(self.training and self.config.prototype_update_enabled)
+        anchor_concept = None
+        alternative_anchor_concept = None
+        anchor_mix_mode = "adaptive_margin"
+        prototype_anchor_input = str(getattr(self.config, "prototype_anchor_input", "global"))
+        if prototype_anchor_input == "global":
+            anchor_concept = encoded.get("h_anchor_global")
+        elif prototype_anchor_input == "core":
+            anchor_concept = encoded.get("h_core")
+        elif prototype_anchor_input == "global_fused_mean":
+            global_anchor = encoded.get("h_anchor_global")
+            fused_anchor = encoded.get("h")
+            if torch.is_tensor(global_anchor) and torch.is_tensor(fused_anchor):
+                anchor_concept = F.layer_norm(
+                    0.5 * (global_anchor + fused_anchor),
+                    (int(global_anchor.shape[-1]),),
+                )
+        elif prototype_anchor_input == "dual_residual":
+            anchor_concept = encoded.get("h_anchor_global")
+            alternative_anchor_concept = encoded.get("h")
+        elif prototype_anchor_input == "dual_residual_margin":
+            anchor_concept = encoded.get("h_anchor_global")
+            alternative_anchor_concept = encoded.get("h")
+            anchor_mix_mode = "residual_margin"
+        elif prototype_anchor_input == "dual_anchor_margin":
+            anchor_concept = encoded.get("h_anchor_global")
+            alternative_anchor_concept = encoded.get("h")
+            anchor_mix_mode = "anchor_margin"
+        elif prototype_anchor_input == "dual_mean":
+            anchor_concept = encoded.get("h_anchor_global")
+            alternative_anchor_concept = encoded.get("h")
+            anchor_mix_mode = "mean"
+        residual_logit_weight = None
+        residual_logit_mode = str(getattr(self.config, "prototype_residual_logit_mode", "static"))
+        if residual_logit_mode in {
+            "agreement",
+            "agreement_tf_balance",
+            "agreement_anchor_prior",
+            "agreement_anchor_uncertainty_centered",
+            "agreement_local_centered",
+            "agreement_candidate_centered",
+            "agreement_anchor_residual_margin_mix",
+            "agreement_candidate_margin_mix",
+            "agreement_global_local_consensus",
+            "agreement_anchor_support",
+        }:
+            time_agreement = encoded.get("time_agreement")
+            freq_agreement = encoded.get("freq_agreement")
+            if torch.is_tensor(time_agreement) and torch.is_tensor(freq_agreement):
+                residual_logit_weight = torch.sqrt(
+                    (time_agreement * freq_agreement).clamp_min(0.0)
+                ).clamp(0.0, 1.0)
+                if residual_logit_mode == "agreement_tf_balance":
+                    tf_balance = (1.0 - (time_agreement - freq_agreement).abs()).clamp(0.0, 1.0)
+                    residual_logit_weight = residual_logit_weight * tf_balance
+                residual_logit_weight = (
+                    float(getattr(self.config, "prototype_residual_logit_weight", 1.0))
+                    * residual_logit_weight
+                )
+        candidate_competition = str(
+            getattr(self.config, "prototype_residual_logit_mode", "static")
+        ) in {
+            "local_evidence",
+            "agreement_local_centered",
+            "local_competition",
+            "agreement_candidate_centered",
+            "agreement_candidate_margin_mix",
+            "global_local_consensus",
+            "agreement_global_local_consensus",
+        }
+        assignment_uses_local = (
+            str(getattr(self.config, "prototype_assignment_input", "concept"))
+            == "local_anomaly"
+        )
+        routing_concept = (
+            encoded.get("h_proto_local")
+            if (candidate_competition or assignment_uses_local)
+            else None
+        )
+        prototype_concept_input = str(getattr(self.config, "prototype_concept_input", "h"))
+        if prototype_concept_input == "local_anomaly":
+            prototype_concept = encoded.get("h_proto_local", encoded["h"])
+        elif prototype_concept_input == "relative":
+            prototype_concept = encoded.get("h_relative", encoded["h"])
+        elif prototype_concept_input == "core":
+            prototype_concept = encoded.get("h_core", encoded["h"])
+        else:
+            prototype_concept = encoded["h"]
         joint_proto_out = self._run_proto_head(
             self.joint_prototype_head,
-            encoded["h"],
+            prototype_concept,
             labels=labels,
             head_key=encoded["head_key"],
             update_enabled=bool(update_enabled),
             prefix="joint",
+            anchor_concept=anchor_concept,
+            alternative_anchor_concept=alternative_anchor_concept,
+            anchor_mix_mode=anchor_mix_mode,
+            residual_logit_weight=residual_logit_weight,
+            routing_concept=routing_concept,
+            candidate_competition=candidate_competition,
         )
-        if not bool(self.config.cooperative_prototypes_enabled):
-            logits = torch.nan_to_num(joint_proto_out["joint_logits"])
+        relative_proto_out: Optional[Dict[str, torch.Tensor]] = None
+        evidence_path_weights = None
+        fused_joint_logits = joint_proto_out["joint_logits"]
+        if prototype_concept_input in {"dual_relative", "dual_relative_learned"}:
+            relative_concept = encoded.get("h_relative")
+            primary_concept = encoded.get("h")
+            if torch.is_tensor(relative_concept) and torch.is_tensor(primary_concept):
+                relative_proto_out = self._run_proto_head(
+                    self.joint_prototype_head,
+                    relative_concept,
+                    labels=labels,
+                    head_key=encoded["head_key"],
+                    update_enabled=False,
+                    prefix="relative",
+                    anchor_concept=anchor_concept,
+                    alternative_anchor_concept=None,
+                    anchor_mix_mode=anchor_mix_mode,
+                    residual_logit_weight=residual_logit_weight,
+                    routing_concept=None,
+                    candidate_competition=False,
+                )
+                primary_logits = joint_proto_out["joint_logits"]
+                relative_logits = relative_proto_out["relative_logits"]
+                if primary_logits.shape[1] <= 1:
+                    evidence_path_weights = primary_logits.new_zeros((primary_logits.shape[0], 2))
+                    evidence_path_weights[:, 0] = 1.0
+                elif (
+                    prototype_concept_input == "dual_relative_learned"
+                    and self.evidence_path_gate_weight is not None
+                ):
+                    primary_top2 = primary_logits.topk(k=2, dim=1).values
+                    relative_top2 = relative_logits.topk(k=2, dim=1).values
+                    primary_margin = primary_top2[:, 0] - primary_top2[:, 1]
+                    relative_margin = relative_top2[:, 0] - relative_top2[:, 1]
+                    time_agreement = encoded.get("time_agreement")
+                    freq_agreement = encoded.get("freq_agreement")
+                    local_global_gap = encoded.get("local_global_disagreement")
+                    if not torch.is_tensor(time_agreement):
+                        time_agreement = primary_margin.new_zeros(primary_margin.shape[0], 1)
+                    if not torch.is_tensor(freq_agreement):
+                        freq_agreement = primary_margin.new_zeros(primary_margin.shape[0], 1)
+                    if not torch.is_tensor(local_global_gap):
+                        local_global_gap = primary_margin.new_zeros(primary_margin.shape[0], 1)
+                    tf_agreement = torch.sqrt(
+                        (
+                            time_agreement.to(primary_logits.device, primary_logits.dtype)
+                            * freq_agreement.to(primary_logits.device, primary_logits.dtype)
+                        ).clamp_min(0.0)
+                    )
+                    gate_features = torch.cat(
+                        [
+                            primary_margin.unsqueeze(1),
+                            relative_margin.unsqueeze(1),
+                            tf_agreement.view(-1, 1),
+                            local_global_gap.to(primary_logits.device, primary_logits.dtype).view(-1, 1),
+                        ],
+                        dim=1,
+                    )
+                    gate_features = F.layer_norm(gate_features, (int(gate_features.shape[-1]),))
+                    gate_logits = gate_features @ self.evidence_path_gate_weight.to(
+                        device=gate_features.device,
+                        dtype=gate_features.dtype,
+                    )
+                    evidence_path_weights = torch.softmax(gate_logits, dim=1)
+                else:
+                    primary_margin = primary_logits.topk(k=2, dim=1).values
+                    primary_margin = primary_margin[:, 0] - primary_margin[:, 1]
+                    relative_margin = relative_logits.topk(k=2, dim=1).values
+                    relative_margin = relative_margin[:, 0] - relative_margin[:, 1]
+                    evidence_path_weights = torch.softmax(
+                        torch.stack([primary_margin, relative_margin], dim=1),
+                        dim=1,
+                    )
+                fused_joint_logits = (
+                    evidence_path_weights[:, 0:1] * primary_logits
+                    + evidence_path_weights[:, 1:2] * relative_logits
+                )
+        if not self.cooperative_enabled:
+            logits = torch.nan_to_num(fused_joint_logits)
             batch_size = int(logits.shape[0])
             prototype_mix = logits.new_zeros((batch_size, 3))
             prototype_mix[:, 2] = 1.0
@@ -1739,7 +2749,13 @@ class Model(nn.Module):
                     "logits": logits,
                     "fused_probs": torch.softmax(logits, dim=-1),
                     "joint_logits": joint_proto_out["joint_logits"],
-                    "joint_logits_calibrated": joint_proto_out["joint_logits"],
+                    "joint_logits_calibrated": fused_joint_logits,
+                    "relative_logits": (
+                        relative_proto_out["relative_logits"]
+                        if relative_proto_out is not None
+                        else None
+                    ),
+                    "evidence_path_weights": evidence_path_weights,
                     "joint_anchor_scores": joint_proto_out["joint_anchor_scores"],
                     "joint_anchor_scores_raw": joint_proto_out["joint_anchor_scores_raw"],
                     "joint_class_anchor": joint_proto_out["joint_class_anchor"],
@@ -1754,7 +2770,24 @@ class Model(nn.Module):
                     "joint_proto_scores_logits": joint_proto_out["joint_proto_scores_logits"],
                     "joint_proto_scores_raw": joint_proto_out["joint_proto_scores_raw"],
                     "joint_proto_residual_scores_raw": joint_proto_out["joint_proto_residual_scores_raw"],
+                    "joint_pooled_residual_scores": joint_proto_out["joint_pooled_residual_scores"],
+                    "joint_anchor_path_weights": joint_proto_out["joint_anchor_path_weights"],
+                    "joint_anchor_residual_path_weights": joint_proto_out[
+                        "joint_anchor_residual_path_weights"
+                    ],
+                    "joint_residual_anchor_support_gate": joint_proto_out[
+                        "joint_residual_anchor_support_gate"
+                    ],
                     "joint_proto_routing_scores": joint_proto_out["joint_proto_routing_scores"],
+                    "joint_local_proto_routing_scores": joint_proto_out[
+                        "joint_local_proto_routing_scores"
+                    ],
+                    "joint_local_proto_pool_weights": joint_proto_out[
+                        "joint_local_proto_pool_weights"
+                    ],
+                    "joint_prototype_candidate_mask": joint_proto_out[
+                        "joint_prototype_candidate_mask"
+                    ],
                     "joint_target_class_ids": joint_proto_out["joint_target_class_ids"],
                     "joint_class_neff": joint_proto_out["joint_class_neff"],
                     "joint_target_class_neff": joint_proto_out["joint_target_class_neff"],
@@ -1778,7 +2811,20 @@ class Model(nn.Module):
                     "anchor_scores_raw": joint_proto_out["joint_anchor_scores_raw"],
                     "class_anchor": joint_proto_out["joint_class_anchor"],
                     "proto_residual_scores_raw": joint_proto_out["joint_proto_residual_scores_raw"],
+                    "pooled_residual_scores": joint_proto_out["joint_pooled_residual_scores"],
+                    "anchor_path_weights": joint_proto_out["joint_anchor_path_weights"],
+                    "anchor_residual_path_weights": joint_proto_out[
+                        "joint_anchor_residual_path_weights"
+                    ],
+                    "residual_anchor_support_gate": joint_proto_out[
+                        "joint_residual_anchor_support_gate"
+                    ],
                     "proto_routing_scores": joint_proto_out["joint_proto_routing_scores"],
+                    "local_proto_routing_scores": joint_proto_out[
+                        "joint_local_proto_routing_scores"
+                    ],
+                    "local_proto_pool_weights": joint_proto_out["joint_local_proto_pool_weights"],
+                    "prototype_candidate_mask": joint_proto_out["joint_prototype_candidate_mask"],
                     "target_class_ids": joint_proto_out["joint_target_class_ids"],
                     "class_neff": joint_proto_out["joint_class_neff"],
                     "target_class_neff": joint_proto_out["joint_target_class_neff"],
@@ -1799,6 +2845,10 @@ class Model(nn.Module):
                 }
             )
             return extras
+        if self.time_prototype_head is None or self.freq_prototype_head is None:
+            raise RuntimeError(
+                "Cooperative prototype mode is enabled but time/freq prototype heads are not initialized."
+            )
         time_proto_out = self._run_proto_head(
             self.time_prototype_head,
             encoded["g_t"],
@@ -1823,6 +2873,8 @@ class Model(nn.Module):
             ],
             dim=1,
         )
+        if self.cooperative_prototype_fusion is None:
+            raise RuntimeError("cooperative_prototype_fusion is not initialized while cooperative mode is enabled.")
         fusion = self.cooperative_prototype_fusion(
             encoded["prototype_evidence_weights"],
             head_logits,
@@ -1969,11 +3021,13 @@ class Model(nn.Module):
         labels: Optional[torch.Tensor],
         sampling_pass: int = 0,
         update_enabled: Optional[bool] = None,
+        time_patch_width_override: int | None = None,
     ) -> Dict[str, Any]:
         encoded = self._encode_structured(
             x=x,
             file_ids_raw=file_ids_raw,
             sampling_pass=sampling_pass,
+            time_patch_width_override=time_patch_width_override,
         )
         return self._attach_prototype_outputs(encoded, labels=labels, update_enabled=update_enabled)
 
@@ -2006,6 +3060,7 @@ class Model(nn.Module):
         file_ids_raw: Any,
         labels: Optional[torch.Tensor],
         sampling_pass: int = 0,
+        time_patch_width_override: int | None = None,
     ) -> Dict[str, Any]:
         if self._should_use_region_ensemble():
             return self._forward_structured_ensemble(
@@ -2019,6 +3074,7 @@ class Model(nn.Module):
             file_ids_raw=file_ids_raw,
             labels=labels,
             sampling_pass=sampling_pass,
+            time_patch_width_override=time_patch_width_override,
         )
 
     def _forward_eval_mc(
@@ -2041,9 +3097,26 @@ class Model(nn.Module):
             return outputs[0]
 
         merged = dict(outputs[0])
+        for key, value in list(merged.items()):
+            if not torch.is_tensor(value) or not value.dtype.is_floating_point:
+                continue
+            stacked_values = [output.get(key) for output in outputs]
+            if any(item is None or not torch.is_tensor(item) for item in stacked_values):
+                continue
+            if any(item.shape != value.shape for item in stacked_values):
+                continue
+            merged[key] = torch.stack(stacked_values, dim=0).mean(dim=0)
+
         logits_stack = torch.stack([output["logits"] for output in outputs], dim=0)
         merged["logits_mc_samples"] = logits_stack
         merged["logits"] = logits_stack.mean(dim=0)
+        if "h" in merged and torch.is_tensor(merged["h"]):
+            h_stack = torch.stack([output["h"] for output in outputs], dim=0)
+            merged["region_ensemble_h_samples"] = h_stack
+            merged["region_ensemble_std"] = h_stack.std(dim=0, unbiased=False).mean()
+            merged["stability_consistency_penalty"] = (
+                h_stack - h_stack.mean(dim=0, keepdim=True)
+            ).pow(2).mean()
         return merged
 
     def forward_with_batch(self, batch: Dict[str, Any], epoch: int = 0) -> Dict[str, Any]:
@@ -2065,6 +3138,19 @@ class Model(nn.Module):
 
     def forward(self, x: torch.Tensor, file_id=None, task_id=None) -> torch.Tensor:
         extras = self._forward_once(x=x, file_ids_raw=file_id, labels=None)
+        # Multi-scale logit ensemble at inference: average predictions from
+        # all configured patch widths for more robust cross-domain decisions.
+        if self.time_patch_widths is not None and not self.training:
+            all_logits = [extras["logits"]]
+            for pw in self.time_patch_widths:
+                ex_pw = self._forward_once(
+                    x=x,
+                    file_ids_raw=file_id,
+                    labels=None,
+                    time_patch_width_override=pw,
+                )
+                all_logits.append(ex_pw["logits"])
+            return torch.stack(all_logits, dim=0).mean(dim=0)
         return extras["logits"]
 
     def compute_contrastive_loss(
@@ -2080,7 +3166,7 @@ class Model(nn.Module):
         consensus_weight = float(self.config.cooperative_consensus_weight)
         if not self.config.use_contrastive_head and consistency_weight <= 0.0 and consensus_weight <= 0.0:
             return self._zero_contrastive_dict(extras["h"])
-        if not bool(self.config.cooperative_prototypes_enabled):
+        if not self.cooperative_enabled:
             joint_contrastive = self._compute_single_head_contrastive(
                 extras, labels, prefix="joint", epoch=epoch, total_epochs=total_epochs
             )
@@ -2107,7 +3193,12 @@ class Model(nn.Module):
             extras["proto_positive_scores"] = joint_contrastive["proto_positive_scores"]
             extras["proto_negative_scores"] = joint_contrastive["proto_negative_scores"]
             extras["prototype_usage"] = joint_contrastive["prototype_usage"]
+            self._attach_decision_diagnostics(joint_contrastive, extras, labels)
             return joint_contrastive
+        if self.time_prototype_head is None or self.freq_prototype_head is None:
+            raise RuntimeError(
+                "Cooperative contrastive path is enabled but time/freq prototype heads are not initialized."
+            )
 
         time_contrastive = self._compute_single_head_contrastive(
             extras, labels, prefix="time", epoch=epoch, total_epochs=total_epochs

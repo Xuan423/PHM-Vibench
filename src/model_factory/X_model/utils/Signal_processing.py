@@ -328,6 +328,55 @@ class Identity(SignalProcessingBase):
         return x
 
 
+class IdentitySpectrum(SignalProcessingBase):
+    def __init__(self, args):
+        super(IdentitySpectrum, self).__init__(args)
+        self.name = "IdentitySpectrum"
+
+    def forward(self, x):
+        return x
+
+
+class LogSpectrum(SignalProcessingBase):
+    def __init__(self, args):
+        super(LogSpectrum, self).__init__(args)
+        self.name = "LogSpectrum"
+
+    def forward(self, x):
+        return torch.log1p(torch.abs(x))
+
+
+class SpectralWhitening(SignalProcessingBase):
+    def __init__(self, args):
+        super(SpectralWhitening, self).__init__(args)
+        self.name = "SpectralWhitening"
+
+    def forward(self, x):
+        eps = 1e-8
+        mean = torch.mean(x, dim=1, keepdim=True)
+        std = torch.std(x, dim=1, keepdim=True, unbiased=False)
+        return (x - mean) / torch.clamp(std, min=eps)
+
+
+class GaussianBandMask(SignalProcessingBase):
+    def __init__(self, args):
+        super(GaussianBandMask, self).__init__(args)
+        self.name = "GaussianBandMask"
+        self.center_logit = nn.Parameter(torch.zeros(1, 1, 1))
+        self.log_sigma = nn.Parameter(torch.log(torch.tensor(0.15)).view(1, 1, 1))
+
+    def forward(self, x):
+        # x: [B, L, C]
+        length = int(x.shape[1])
+        grid = torch.linspace(0.0, 1.0, length, device=x.device, dtype=x.dtype).view(1, length, 1)
+        center = torch.sigmoid(self.center_logit).to(device=x.device, dtype=x.dtype)
+        sigma = torch.exp(self.log_sigma).clamp_min(1e-3).to(device=x.device, dtype=x.dtype)
+        mask = torch.exp(-0.5 * ((grid - center) / sigma) ** 2)
+        norm = torch.sqrt(torch.clamp(torch.sum(mask ** 2, dim=1, keepdim=True), min=1e-8))
+        mask = mask / norm
+        return x * mask
+
+
 #%% 5 
 
 class Morlet(SignalProcessingBase):

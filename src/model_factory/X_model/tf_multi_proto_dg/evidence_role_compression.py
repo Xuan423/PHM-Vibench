@@ -13,6 +13,7 @@ class EvidenceRoleCompression(nn.Module):
         nonneg: str = "none",
         input_norm: str = "layernorm",
         output_norm: str = "none",
+        init_mode: str = "random_normal",
     ) -> None:
         super().__init__()
         self.in_features = int(in_features)
@@ -20,11 +21,34 @@ class EvidenceRoleCompression(nn.Module):
         self.nonneg = str(nonneg)
         self.input_norm = str(input_norm)
         self.output_norm = str(output_norm)
-        self.raw_basis = nn.Parameter(torch.randn(self.in_features, self.role_dim) * 0.02)
+        self.init_mode = str(init_mode)
+        if self.init_mode == "random_normal":
+            basis = torch.randn(self.in_features, self.role_dim) * 0.02
+        elif self.init_mode == "dct":
+            basis = self._build_dct_basis(self.in_features, self.role_dim) * 0.02
+        else:
+            raise ValueError(
+                f"Unsupported role_init_mode={init_mode!r}. "
+                "Expected one of {'random_normal', 'dct'}."
+            )
+        self.raw_basis = nn.Parameter(basis)
         # Compatibility-only parameter: kept to preserve historical initialization
         # order and checkpoint key layout (previously part of the removed residual path).
         # It is intentionally not used in forward computation.
         self.residual_proj = nn.Linear(self.in_features, self.role_dim, bias=False)
+
+    @staticmethod
+    def _build_dct_basis(in_features: int, role_dim: int) -> torch.Tensor:
+        """Seed-independent smooth basis over fixed operator-indicator coordinates."""
+        positions = torch.arange(int(in_features), dtype=torch.float32).add(0.5)
+        frequencies = torch.arange(int(role_dim), dtype=torch.float32)
+        basis = torch.cos(torch.pi * positions[:, None] * frequencies[None, :] / float(max(in_features, 1)))
+        if role_dim > 0:
+            basis[:, 0] = 1.0
+        basis = basis - basis.mean(dim=0, keepdim=True)
+        basis[:, 0] = 1.0
+        basis = basis / basis.norm(dim=0, keepdim=True).clamp_min(1e-6)
+        return basis
 
     def _build_basis(self) -> torch.Tensor:
         if self.nonneg == "softplus":

@@ -324,6 +324,17 @@ save/{metadata_file}/{model_name}/{task_type}_{trainer_name}_{timestamp}/
 - Comprehensive metrics logging
 - Automatic figure generation for analysis
 
+## TF_MultiProtoDG Slash Commands (from Codex skills)
+
+The following slash commands are available for TF_MultiProtoDG development, migrated from `~/.codex/skills/`:
+
+| Command | Description |
+|---------|-------------|
+| `/tfmpdg-root-cause` | T0 root cause analysis: drift diagnosis, branch cleanup, init pollution check |
+| `/tfmpdg-doc-sync` | Three-way sync: yaml ↔ code ↔ architecture docs |
+| `/tfmpdg-low-io-validation [quick\|long\|summary]` | Low-resource validation: 20ep quick check, 50+ep multi-seed, result summary |
+| `/tfmpdg-mainline-rules` | Mainline architecture compliance: chain audit, forbidden pattern scan, config alignment |
+
 ## Important Notes
 
 - The codebase uses factory patterns extensively - always register new components in the appropriate factory

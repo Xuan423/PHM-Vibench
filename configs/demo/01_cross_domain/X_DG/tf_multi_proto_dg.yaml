@@ -18,11 +18,12 @@ environment:
   # per-iteration data/sampler randomness (set null to disable).
   model_init_seed: null
   output_dir: "results/demo/tf_multi_proto_dg_sys27_sys21_family"
-  notes: "TF_MultiProtoDG clean mainline: semantic-stats residual + deterministic prototype init + joint prototype contrastive + sample-epoch hashed random partition."
+  notes: "TF_MultiProtoDG v4.3 timedual mainline: deep-global time evidence fuses learned and deterministic semantic bases, frequency keeps enhanced deep-global processing, and joint multi-prototype contrast uses anchored agreement residuals. No domain shortcut, no fixed model seed."
 
 data:
   batch_size: 64
-  num_workers: 2
+  num_workers: 4
+  pin_memory: false
   # Stabilize early prototype bootstrap by avoiding extreme per-batch label skew.
   train_label_stratified: false
   label_metadata_key: "Label"
@@ -31,9 +32,9 @@ task:
   target_system_id: [27]
   source_domain_id: [1,2]
   target_domain_id: [0]
-  label_smoothing: 0.05
+  label_smoothing: 0.08
   lr: 0.001
-  weight_decay: 0.0005
+  weight_decay: 0.0003
 
 model:
   name: "TF_MultiProtoDG"
@@ -55,50 +56,58 @@ model:
   padding_mode: "zero_right"
   transparent_backbone_enabled: true
   transparent_backbone_weight: 1.0
+  transparent_backbone_deterministic_init: false
+  transparent_time_dual_basis_enabled: true
   transparent_backbone_layers: 4
   transparent_backbone_modules: ["WF", "HT", "I"]
   transparent_backbone_features: ["Mean", "Std", "Entropy", "RMS", "Kurtosis", "CrestFactor", "AbsMean", "Skewness", "ClearanceFactor", "ShapeFactor"]
-  transparent_backbone_out_channels: 3
-  transparent_backbone_scale: 4
-  transparent_backbone_skip_connection: true
+  transparent_backbone_freq_modules: ["IdentitySpectrum", "LogSpectrum", "SpectralWhitening", "GaussianBandMask"]
+  transparent_backbone_freq_features: ["BandEnergy", "BandRMS", "SpectralEntropy", "PeakRatio"]
+  transparent_backbone_feature_norm: "legacy_running"
+  transparent_backbone_feature_norm_eps: 0.2
+  transparent_projection_init_mode: "random_normal"
+  structured_global_enabled: false
   role_dim: 16
   concept_dim: 64
   num_prototypes_per_class: 3
-  prototype_temperature: 0.12
-  prototype_assignment_temperature: 0.12
+  prototype_temperature: 0.15
+  prototype_assignment_temperature: 0.15
   prototype_class_pool_mode: "logsumexp"
+  prototype_class_anchor_mode: "mean"
+  prototype_anchor_input: "global"
+  prototype_concept_input: "h"
+  prototype_assignment_input: "concept"
+  local_anomaly_residual_mode: "mlp"
+  local_anomaly_gate_mode: "cross_focus"
+  semantic_residual_init: "zero"
+  prototype_residual_score_mode: "anchored_offset"
+  prototype_residual_logit_weight: 1.0
+  prototype_residual_logit_mode: "agreement"
   proto_contrastive_temperature: 0.2
-  proto_contrastive_positive_mode: "assigned"
+  proto_contrastive_positive_mode: "softmax_expectation"
   use_contrastive_head: true
-  proto_contrastive_weight: 0.08
-  adaptive_proto_enabled: false
-  adaptive_proto_min_scale: 0.5
-  adaptive_proto_max_scale: 2.0
+  # T0 no-trick mainline: keep prototype contrastive always-on and disable
+  # adaptive target heuristics for cross-dataset portability.
+  proto_contrastive_weight: 0.1
+  proto_contrastive_use_scaled_scores: true
   contrastive_warmup_epochs: 0
+  adaptive_proto_enabled: false
   prototype:
     assignment_mode: "soft_balanced"
     balance_weight: 0.05
-  channel_fusion_norm: "layernorm"
-  role_nonneg: "none"
-  role_input_norm: "layernorm"
-  role_output_norm: "none"
-  cross_score_norm: "layernorm"
+  role_init_mode: "random_normal"
   cross_pool_mode: "logsumexp"
   cross_pool_tau: 0.6
-  cross_self_mix: 0.18
-  cross_self_score_mode: "absmean"
-  concept_norm: "layernorm"
+  cross_self_mix: 1.0
+  cross_adaptive_self_mix: false
   prototype_logit_scale_init: 6.0
   prototype_init_mode: "deterministic_anchor"
   prototype_init_scale: 0.02
   cooperative_prototypes_enabled: false
-  swa_enabled: false
-  export_diagnostics: false
-  prototype_card_top_t: 8
-  diagnostics_max_members: 32
   classifier:
     residual_input: "semantic_stats"
     residual_weight: 0.05
+    residual_alignment_mode: "off"
     residual_init: "default"
     scale: 1.0
       
