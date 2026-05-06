@@ -173,6 +173,7 @@ class ClassifierConfig:
     residual_rank: int | None = None
     residual_init: str = "default"
     residual_init_seed: int | None = None
+    preserve_residual_rng: bool = False
 
 
 @dataclass(frozen=True)
@@ -219,6 +220,7 @@ class TFMultiProtoDGConfig:
     transparent_backbone_time_deterministic_init: bool | None = None
     transparent_backbone_freq_deterministic_init: bool | None = None
     transparent_time_dual_basis_enabled: bool = False
+    transparent_freq_dual_learned_enabled: bool = False
     transparent_backbone_layers: int = 2
     transparent_backbone_modules: List[str] = field(default_factory=list)
     transparent_backbone_features: List[str] = field(default_factory=list)
@@ -234,6 +236,8 @@ class TFMultiProtoDGConfig:
     cross_patch_norm_enabled: bool = False
     cross_patch_norm_scope: str = "anomaly"
     evidence_dropout_rate: float = 0.0
+    concept_segment_dropout_rate: float = 0.0
+    concept_segment_norm_enabled: bool = False
     region_ensemble_samples: int = 1
     stability_consistency_weight: float = 0.0
     eval_mc_samples: int = 1
@@ -261,14 +265,21 @@ class TFMultiProtoDGConfig:
     prototype_temperature: float = 0.07
     prototype_class_pool_mode: str = "logsumexp"
     prototype_class_anchor_mode: str = "mean"
+    prototype_class_anchor_memory_weight: float = 0.0
+    prototype_class_anchor_memory_momentum: float = 0.95
+    prototype_anchor_score_mode: str = "full"
     prototype_anchor_input: str = "global"
     prototype_concept_input: str = "h"
     prototype_assignment_input: str = "concept"
+    local_prototype_concept_source: str = "role"
     local_anomaly_residual_mode: str = "direct"
     local_anomaly_gate_mode: str = "cross_focus"
     semantic_residual_init: str = "anomaly_zero"
+    global_semantic_refiner_mode: str = "full"
+    global_anchor_refiner_mode: str = "shared"
     prototype_residual_score_mode: str = "dot_difference"
     prototype_residual_logit_weight: float = 1.0
+    prototype_residual_warmup_epochs: int = 0
     prototype_residual_logit_mode: str = "static"
     adaptive_class_temperature_enabled: bool = False
     adaptive_class_temperature_target_neff: float = 2.0
@@ -527,6 +538,31 @@ def build_model_config(args_model: Any, metadata: Any) -> TFMultiProtoDGConfig:
         "model.prototype_class_anchor_mode",
         {"mean", "independent", "tied_offset", "hybrid_tied_mean"},
     )
+    prototype_class_anchor_memory_weight = _coerce_non_negative_float(
+        getattr(args_model, "prototype_class_anchor_memory_weight", 0.0),
+        "model.prototype_class_anchor_memory_weight",
+        0.0,
+    )
+    if prototype_class_anchor_memory_weight > 1.0:
+        raise ValueError(
+            "model.prototype_class_anchor_memory_weight must be in [0, 1], "
+            f"got {prototype_class_anchor_memory_weight}."
+        )
+    prototype_class_anchor_memory_momentum = _coerce_float(
+        getattr(args_model, "prototype_class_anchor_memory_momentum", 0.95),
+        "model.prototype_class_anchor_memory_momentum",
+        0.95,
+    )
+    if not 0.0 <= prototype_class_anchor_memory_momentum < 1.0:
+        raise ValueError(
+            "model.prototype_class_anchor_memory_momentum must be in [0, 1), "
+            f"got {prototype_class_anchor_memory_momentum}."
+        )
+    prototype_anchor_score_mode = _validate_choice(
+        str(getattr(args_model, "prototype_anchor_score_mode", "full")),
+        "model.prototype_anchor_score_mode",
+        {"full", "time_tf"},
+    )
     prototype_anchor_input = _validate_choice(
         str(getattr(args_model, "prototype_anchor_input", "global")),
         "model.prototype_anchor_input",
@@ -551,6 +587,11 @@ def build_model_config(args_model: Any, metadata: Any) -> TFMultiProtoDGConfig:
         "model.prototype_assignment_input",
         {"concept", "local_anomaly"},
     )
+    local_prototype_concept_source = _validate_choice(
+        str(getattr(args_model, "local_prototype_concept_source", "role")),
+        "model.local_prototype_concept_source",
+        {"role", "profile_strength"},
+    )
     local_anomaly_residual_mode = _validate_choice(
         str(getattr(args_model, "local_anomaly_residual_mode", "direct")),
         "model.local_anomaly_residual_mode",
@@ -566,6 +607,25 @@ def build_model_config(args_model: Any, metadata: Any) -> TFMultiProtoDGConfig:
         "model.semantic_residual_init",
         {"zero", "default", "anomaly_zero", "small"},
     )
+    global_semantic_refiner_mode = _validate_choice(
+        str(getattr(args_model, "global_semantic_refiner_mode", "full")),
+        "model.global_semantic_refiner_mode",
+        {
+            "full",
+            "segment_wise",
+            "segment_lowrank",
+            "full_to_segment",
+            "hybrid_segment",
+            "segment_to_hybrid",
+            "segment_expanded",
+            "agreement_gated_cross",
+        },
+    )
+    global_anchor_refiner_mode = _validate_choice(
+        str(getattr(args_model, "global_anchor_refiner_mode", "shared")),
+        "model.global_anchor_refiner_mode",
+        {"shared", "identity", "segment_wise", "segment_consensus"},
+    )
     prototype_residual_score_mode = _validate_choice(
         str(getattr(args_model, "prototype_residual_score_mode", "dot_difference")),
         "model.prototype_residual_score_mode",
@@ -576,6 +636,11 @@ def build_model_config(args_model: Any, metadata: Any) -> TFMultiProtoDGConfig:
         "model.prototype_residual_logit_weight",
         1.0,
     )
+    prototype_residual_warmup_epochs = _coerce_non_negative_int(
+        getattr(args_model, "prototype_residual_warmup_epochs", 0),
+        "model.prototype_residual_warmup_epochs",
+        0,
+    )
     prototype_residual_logit_mode = _validate_choice(
         str(getattr(args_model, "prototype_residual_logit_mode", "static")),
         "model.prototype_residual_logit_mode",
@@ -585,6 +650,7 @@ def build_model_config(args_model: Any, metadata: Any) -> TFMultiProtoDGConfig:
             "agreement_tf_balance",
             "local_evidence",
             "agreement_local_centered",
+            "agreement_local_slot_verify",
             "local_competition",
             "global_local_consensus",
             "agreement_global_local_consensus",
@@ -831,6 +897,9 @@ def build_model_config(args_model: Any, metadata: Any) -> TFMultiProtoDGConfig:
         residual_rank=classifier_residual_rank,
         residual_init=classifier_residual_init,
         residual_init_seed=classifier_residual_init_seed,
+        preserve_residual_rng=bool(
+            _namespace_get(classifier_raw, "preserve_residual_rng", False)
+        ),
     )
 
     prototype_raw = getattr(args_model, "prototype", None)
@@ -1137,6 +1206,9 @@ def build_model_config(args_model: Any, metadata: Any) -> TFMultiProtoDGConfig:
     transparent_time_dual_basis_enabled = bool(
         getattr(args_model, "transparent_time_dual_basis_enabled", False)
     )
+    transparent_freq_dual_learned_enabled = bool(
+        getattr(args_model, "transparent_freq_dual_learned_enabled", False)
+    )
     transparent_backbone_layers = _coerce_non_negative_int(
         getattr(args_model, "transparent_backbone_layers", 2),
         "model.transparent_backbone_layers",
@@ -1202,6 +1274,16 @@ def build_model_config(args_model: Any, metadata: Any) -> TFMultiProtoDGConfig:
     )
     if evidence_dropout_rate >= 1.0:
         raise ValueError("model.evidence_dropout_rate must be < 1.0.")
+    concept_segment_dropout_rate = _coerce_non_negative_float(
+        getattr(args_model, "concept_segment_dropout_rate", 0.0),
+        "model.concept_segment_dropout_rate",
+        0.0,
+    )
+    if concept_segment_dropout_rate >= 1.0:
+        raise ValueError("model.concept_segment_dropout_rate must be < 1.0.")
+    concept_segment_norm_enabled = bool(
+        getattr(args_model, "concept_segment_norm_enabled", False)
+    )
     region_ensemble_samples = _coerce_positive_int(
         getattr(args_model, "region_ensemble_samples", 1),
         "model.region_ensemble_samples",
@@ -1349,6 +1431,7 @@ def build_model_config(args_model: Any, metadata: Any) -> TFMultiProtoDGConfig:
         transparent_backbone_time_deterministic_init=transparent_backbone_time_deterministic_init,
         transparent_backbone_freq_deterministic_init=transparent_backbone_freq_deterministic_init,
         transparent_time_dual_basis_enabled=transparent_time_dual_basis_enabled,
+        transparent_freq_dual_learned_enabled=transparent_freq_dual_learned_enabled,
         transparent_backbone_layers=transparent_backbone_layers,
         transparent_backbone_modules=transparent_backbone_modules,
         transparent_backbone_features=transparent_backbone_features,
@@ -1364,6 +1447,8 @@ def build_model_config(args_model: Any, metadata: Any) -> TFMultiProtoDGConfig:
         cross_patch_norm_enabled=cross_patch_norm_enabled,
         cross_patch_norm_scope=cross_patch_norm_scope,
         evidence_dropout_rate=evidence_dropout_rate,
+        concept_segment_dropout_rate=concept_segment_dropout_rate,
+        concept_segment_norm_enabled=concept_segment_norm_enabled,
         region_ensemble_samples=region_ensemble_samples,
         stability_consistency_weight=stability_consistency_weight,
         eval_mc_samples=eval_mc_samples,
@@ -1391,14 +1476,21 @@ def build_model_config(args_model: Any, metadata: Any) -> TFMultiProtoDGConfig:
         prototype_temperature=prototype_temperature,
         prototype_class_pool_mode=prototype_class_pool_mode,
         prototype_class_anchor_mode=prototype_class_anchor_mode,
+        prototype_class_anchor_memory_weight=prototype_class_anchor_memory_weight,
+        prototype_class_anchor_memory_momentum=prototype_class_anchor_memory_momentum,
+        prototype_anchor_score_mode=prototype_anchor_score_mode,
         prototype_anchor_input=prototype_anchor_input,
         prototype_concept_input=prototype_concept_input,
         prototype_assignment_input=prototype_assignment_input,
+        local_prototype_concept_source=local_prototype_concept_source,
         local_anomaly_residual_mode=local_anomaly_residual_mode,
         local_anomaly_gate_mode=local_anomaly_gate_mode,
         semantic_residual_init=semantic_residual_init,
+        global_semantic_refiner_mode=global_semantic_refiner_mode,
+        global_anchor_refiner_mode=global_anchor_refiner_mode,
         prototype_residual_score_mode=prototype_residual_score_mode,
         prototype_residual_logit_weight=prototype_residual_logit_weight,
+        prototype_residual_warmup_epochs=prototype_residual_warmup_epochs,
         prototype_residual_logit_mode=prototype_residual_logit_mode,
         adaptive_class_temperature_enabled=adaptive_class_temperature_enabled,
         adaptive_class_temperature_target_neff=adaptive_class_temperature_target_neff,

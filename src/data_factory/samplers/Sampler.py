@@ -12,9 +12,10 @@ class Same_system_Sampler(Sampler):
     def __init__(self, dataset: IdIncludedDataset,
                   batch_size: int,
                     shuffle: bool = True,
-                      drop_last: bool = False,
+                        drop_last: bool = False,
                         system_metadata_key: str = 'Dataset_id',
                         stratified_labels: bool = False,
+                        stratified_label_epochs: int = 0,
                         label_metadata_key: str = "Label"):
         """
         Batch sampler，确保每个批次中的所有样本都来自同一个 system_id。
@@ -43,6 +44,8 @@ class Same_system_Sampler(Sampler):
         self.drop_last = drop_last
         self.system_metadata_key = system_metadata_key
         self.stratified_labels = bool(stratified_labels)
+        self.stratified_label_epochs = max(int(stratified_label_epochs), 0)
+        self._epoch = 0
         self.label_metadata_key = str(label_metadata_key)
 
         # 1. 按 system_id 对全局索引进行分组
@@ -66,7 +69,7 @@ class Same_system_Sampler(Sampler):
         
         self.system_id_list = list(self.indices_per_system.keys())
         self.label_per_index = {}
-        if self.stratified_labels:
+        if self.stratified_labels or self.stratified_label_epochs > 0:
             for global_idx, sample_info in enumerate(self.dataset.file_windows_list):
                 file_id = sample_info.get("file_id")
                 meta_entry = self.dataset.metadata.get(file_id, {})
@@ -91,6 +94,7 @@ class Same_system_Sampler(Sampler):
 
     def __iter__(self):
         all_batches_for_epoch = []
+        use_stratified_labels = self.stratified_labels or self._epoch < self.stratified_label_epochs
         
         systems_to_process = list(self.system_id_list)
         if self.shuffle:
@@ -101,7 +105,7 @@ class Same_system_Sampler(Sampler):
             if not system_specific_global_indices:
                 continue
 
-            if self.stratified_labels:
+            if use_stratified_labels:
                 label_to_indices = {}
                 for idx in system_specific_global_indices:
                     label = self.label_per_index.get(idx, 0)
@@ -134,7 +138,7 @@ class Same_system_Sampler(Sampler):
         # 这会使得来自不同系统ID的批次序列完全随机，而不仅仅是系统ID处理顺序随机。
         if self.shuffle and len(all_batches_for_epoch) > 1 :
             random.shuffle(all_batches_for_epoch)
-            
+        self._epoch += 1
         return iter(all_batches_for_epoch)
 
     def __len__(self):

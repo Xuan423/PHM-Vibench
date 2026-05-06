@@ -330,10 +330,11 @@ The following slash commands are available for TF_MultiProtoDG development, migr
 
 | Command | Description |
 |---------|-------------|
-| `/tfmpdg-root-cause` | T0 root cause analysis: drift diagnosis, branch cleanup, init pollution check |
-| `/tfmpdg-doc-sync` | Three-way sync: yaml ↔ code ↔ architecture docs |
-| `/tfmpdg-low-io-validation [quick\|long\|summary]` | Low-resource validation: 20ep quick check, 50+ep multi-seed, result summary |
-| `/tfmpdg-mainline-rules` | Mainline architecture compliance: chain audit, forbidden pattern scan, config alignment |
+| `/tfmpdg-root-cause` | T0 root cause analysis: drift diagnosis, branch cleanup, init pollution check, rejected directions table |
+| `/tfmpdg-doc-sync` | Three-way sync: yaml, code, architecture docs, evidence chain verification |
+| `/tfmpdg-low-io-validation [quick\|long\|summary]` | Low-resource validation: 20-30ep quick check, 100ep multi-seed, result summary |
+| `/tfmpdg-mainline-rules` | Mainline architecture compliance: chain audit, forbidden pattern scan, config alignment, comprehensive rejected directions |
+| `/tfmpdg-skill-update` | Meta-maintenance: sync stable findings & rejected directions into all tfmpdg skills |
 
 ## Important Notes
 

@@ -26,12 +26,13 @@ data:
   pin_memory: false
   # Stabilize early prototype bootstrap by avoiding extreme per-batch label skew.
   train_label_stratified: false
+  train_label_stratified_epochs: 0
   label_metadata_key: "Label"
 
 task:
   target_system_id: [27]
-  source_domain_id: [1,2]
-  target_domain_id: [0]
+  source_domain_id: [0,1]
+  target_domain_id: [2]
   label_smoothing: 0.08
   lr: 0.001
   weight_decay: 0.0003
@@ -82,7 +83,7 @@ model:
   semantic_residual_init: "zero"
   prototype_residual_score_mode: "anchored_offset"
   prototype_residual_logit_weight: 1.0
-  prototype_residual_logit_mode: "agreement"
+  prototype_residual_logit_mode: "agreement_local_slot_verify"
   proto_contrastive_temperature: 0.2
   proto_contrastive_positive_mode: "softmax_expectation"
   use_contrastive_head: true
@@ -90,8 +91,9 @@ model:
   # adaptive target heuristics for cross-dataset portability.
   proto_contrastive_weight: 0.1
   proto_contrastive_use_scaled_scores: true
-  contrastive_warmup_epochs: 0
+  contrastive_warmup_epochs: 10
   adaptive_proto_enabled: false
+  prototype_residual_warmup_epochs: 10
   prototype:
     assignment_mode: "soft_balanced"
     balance_weight: 0.05

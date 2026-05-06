@@ -30,6 +30,9 @@ class PrototypeHead(nn.Module):
         init_mode: str = "random_normal",
         init_scale: float = 0.02,
         class_anchor_mode: str = "mean",
+        class_anchor_memory_weight: float = 0.0,
+        class_anchor_memory_momentum: float = 0.95,
+        anchor_score_mode: str = "full",
         residual_score_mode: str = "dot_difference",
         residual_logit_mode: str = "static",
         residual_logit_weight: float = 1.0,
@@ -64,6 +67,8 @@ class PrototypeHead(nn.Module):
             )
         self.init_scale = float(init_scale)
         self.class_anchor_mode = str(class_anchor_mode)
+        self.class_anchor_memory_weight = float(class_anchor_memory_weight)
+        self.class_anchor_memory_momentum = float(class_anchor_memory_momentum)
         if self.class_anchor_mode not in {
             "mean",
             "independent",
@@ -73,6 +78,15 @@ class PrototypeHead(nn.Module):
             raise ValueError(
                 f"Unsupported class_anchor_mode={self.class_anchor_mode!r}. "
                 "Expected one of {'mean', 'independent', 'tied_offset', 'hybrid_tied_mean'}."
+            )
+        self.anchor_score_mode = str(anchor_score_mode)
+        if self.anchor_score_mode not in {
+            "full",
+            "time_tf",
+        }:
+            raise ValueError(
+                f"Unsupported anchor_score_mode={self.anchor_score_mode!r}. "
+                "Expected one of {'full', 'time_tf'}."
             )
         self.residual_score_mode = str(residual_score_mode)
         if self.residual_score_mode not in {"dot_difference", "anchored_offset", "anchored_routing"}:
@@ -87,6 +101,7 @@ class PrototypeHead(nn.Module):
             "agreement_tf_balance",
             "local_evidence",
             "agreement_local_centered",
+            "agreement_local_slot_verify",
             "local_competition",
             "global_local_consensus",
             "agreement_global_local_consensus",
@@ -197,7 +212,14 @@ class PrototypeHead(nn.Module):
             f"_proto_initialized_{bufkey}",
             torch.ones(class_count, self.num_prototypes_per_class, dtype=torch.bool),
         )
-
+        self.register_buffer(
+            f"_proto_class_anchor_memory_{bufkey}",
+            F.normalize(anchor_init.detach().clone(), dim=-1),
+        )
+        self.register_buffer(
+            f"_proto_class_anchor_memory_initialized_{bufkey}",
+            torch.zeros(class_count, dtype=torch.bool),
+        )
     def _get_buffers(
         self, head_key: str
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -210,6 +232,66 @@ class PrototypeHead(nn.Module):
             getattr(self, f"_proto_since_{bufkey}"),
             getattr(self, f"_proto_initialized_{bufkey}"),
         )
+
+    def _get_anchor_memory(self, head_key: str) -> tuple[torch.Tensor, torch.Tensor]:
+        bufkey = self._head_to_bufkey[str(head_key)]
+        return (
+            getattr(self, f"_proto_class_anchor_memory_{bufkey}"),
+            getattr(self, f"_proto_class_anchor_memory_initialized_{bufkey}"),
+        )
+
+    @torch.no_grad()
+    def _update_anchor_memory(
+        self,
+        head_key: str,
+        labels: torch.Tensor,
+        anchor_h_norm: torch.Tensor,
+    ) -> None:
+        if self.class_anchor_memory_weight <= 0.0:
+            return
+        memory, initialized = self._get_anchor_memory(head_key)
+        momentum = min(max(float(self.class_anchor_memory_momentum), 0.0), 0.9999)
+        labels = labels.to(anchor_h_norm.device).long()
+        for class_id in labels.unique(sorted=True).tolist():
+            class_id = int(class_id)
+            class_mask = labels == class_id
+            if class_mask.sum() == 0 or class_id < 0 or class_id >= memory.shape[0]:
+                continue
+            class_mean = F.normalize(anchor_h_norm[class_mask].mean(dim=0), dim=0)
+            if bool(initialized[class_id].item()):
+                updated = F.normalize(
+                    momentum * memory[class_id].to(anchor_h_norm.device)
+                    + (1.0 - momentum) * class_mean,
+                    dim=0,
+                )
+            else:
+                updated = class_mean
+            memory[class_id].copy_(updated.to(memory.device, dtype=memory.dtype))
+            initialized[class_id] = True
+
+    def _blend_anchor_memory(
+        self,
+        head_key: str,
+        class_anchor: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.class_anchor_memory_weight <= 0.0 or self.training:
+            return class_anchor
+        memory, initialized = self._get_anchor_memory(head_key)
+        memory_snapshot = memory.detach().clone()
+        initialized_snapshot = initialized.detach().clone()
+        weight = class_anchor.new_full(
+            (class_anchor.shape[0], 1),
+            min(max(float(self.class_anchor_memory_weight), 0.0), 1.0),
+        )
+        mask = initialized_snapshot.to(device=class_anchor.device).view(-1, 1)
+        if not bool(mask.any().item()):
+            return class_anchor
+        memory_snapshot = memory_snapshot.to(device=class_anchor.device, dtype=class_anchor.dtype)
+        blended = F.normalize(
+            (1.0 - weight) * class_anchor + weight * memory_snapshot,
+            dim=-1,
+        )
+        return torch.where(mask, blended, class_anchor)
 
     def _update_usage(self, head_key: str, class_ids: torch.Tensor, target_proto_probs: torch.Tensor) -> None:
         _, _, _, counts, since, initialized = self._get_buffers(head_key)
@@ -423,6 +505,28 @@ class PrototypeHead(nn.Module):
             proto_offset,
         )
 
+    def _class_anchor_scores(
+        self,
+        concept_norm: torch.Tensor,
+        class_anchor: torch.Tensor,
+    ) -> torch.Tensor:
+        if int(concept_norm.shape[-1]) != int(class_anchor.shape[-1]):
+            return torch.einsum("bd,nd->bn", concept_norm, class_anchor)
+        if (
+            self.anchor_score_mode == "time_tf"
+            and int(concept_norm.shape[-1]) % 4 == 0
+        ):
+            role_dim = int(concept_norm.shape[-1]) // 4
+            concept_segments = concept_norm.view(concept_norm.shape[0], 4, role_dim)
+            anchor_segments = class_anchor.view(class_anchor.shape[0], 4, role_dim)
+            segment_scores = torch.einsum(
+                "bsd,csd->bcs",
+                concept_segments,
+                anchor_segments,
+            )
+            return segment_scores[:, :, 0] + segment_scores[:, :, 2]
+        return torch.einsum("bd,nd->bn", concept_norm, class_anchor)
+
     def forward(
         self,
         h: torch.Tensor,
@@ -443,7 +547,9 @@ class PrototypeHead(nn.Module):
         h_norm = F.normalize(h, dim=-1)
         anchor_h_norm = h_norm if anchor_h is None else F.normalize(anchor_h, dim=-1)
         class_anchor, proto_norm = self._materialize_anchor_and_prototypes(head_key, prototypes)
-        anchor_scores_raw = torch.einsum("bd,nd->bn", anchor_h_norm, class_anchor)
+        class_anchor = self._blend_anchor_memory(head_key, class_anchor)
+        full_anchor_scores_raw = torch.einsum("bd,nd->bn", anchor_h_norm, class_anchor)
+        anchor_scores_raw = self._class_anchor_scores(anchor_h_norm, class_anchor)
         proto_scores_raw = torch.einsum("bd,nkd->bnk", h_norm, proto_norm)
         anchored_proto_residual_scores_raw = None
         if self.residual_score_mode in {"anchored_offset", "anchored_routing"} and anchor_h is not None:
@@ -456,7 +562,7 @@ class PrototypeHead(nn.Module):
         if self.residual_score_mode == "anchored_offset" and anchored_proto_residual_scores_raw is not None:
             proto_residual_scores_raw = anchored_proto_residual_scores_raw
         else:
-            proto_residual_scores_raw = proto_scores_raw - anchor_scores_raw.unsqueeze(-1)
+            proto_residual_scores_raw = proto_scores_raw - full_anchor_scores_raw.unsqueeze(-1)
         routing_proto_residual_scores_raw = (
             anchored_proto_residual_scores_raw
             if self.residual_score_mode in {"anchored_offset", "anchored_routing"}
@@ -526,6 +632,7 @@ class PrototypeHead(nn.Module):
         residual_anchor_support_gate = None
         local_proto_pool_weights = torch.softmax(local_proto_routing_scores / assign_tau, dim=-1)
         local_pooled_residual = torch.sum(local_proto_pool_weights * local_proto_scores_logits, dim=-1)
+        local_slot_reliability = None
         candidate_centered = (
             self.residual_logit_mode
             in {
@@ -575,6 +682,22 @@ class PrototypeHead(nn.Module):
                 dim=1,
                 keepdim=True,
             )
+        elif self.residual_logit_mode == "agreement_local_slot_verify":
+            # Local abnormal evidence is not a class classifier. It verifies
+            # whether the same within-class prototype slot is supported by the
+            # global/fused route and the localized anomaly route.
+            if self.num_prototypes_per_class > 1:
+                global_slot_probs = torch.softmax(proto_routing_scores / assign_tau, dim=-1)
+                local_slot_probs = torch.softmax(local_proto_routing_scores / assign_tau, dim=-1)
+                slot_alignment = float(self.num_prototypes_per_class) * (
+                    global_slot_probs * local_slot_probs
+                ).sum(dim=-1)
+                local_slot_reliability = slot_alignment / slot_alignment.mean(
+                    dim=1,
+                    keepdim=True,
+                ).clamp_min(1e-6)
+            else:
+                local_slot_reliability = torch.ones_like(pooled_residual)
         if candidate_centered and pooled_residual.shape[1] > 1:
             top_count = min(2, int(pooled_residual.shape[1]))
             top_indices = anchor_scores.topk(k=top_count, dim=1).indices
@@ -613,6 +736,8 @@ class PrototypeHead(nn.Module):
             ).clamp(0.0, 1.0)
             residual_weight = residual_weight * residual_anchor_support_gate
         residual_evidence = residual_weight * pooled_residual
+        if local_slot_reliability is not None:
+            residual_evidence = residual_evidence * local_slot_reliability
         if self.residual_logit_mode in {
             "anchor_residual_margin_mix",
             "agreement_anchor_residual_margin_mix",
@@ -640,7 +765,8 @@ class PrototypeHead(nn.Module):
 
         if alternative_anchor_h is not None:
             alt_anchor_h_norm = F.normalize(alternative_anchor_h, dim=-1)
-            alt_anchor_scores_raw = torch.einsum("bd,nd->bn", alt_anchor_h_norm, class_anchor)
+            alt_full_anchor_scores_raw = torch.einsum("bd,nd->bn", alt_anchor_h_norm, class_anchor)
+            alt_anchor_scores_raw = self._class_anchor_scores(alt_anchor_h_norm, class_anchor)
             alt_anchored_proto_residual_scores_raw = None
             if self.residual_score_mode in {"anchored_offset", "anchored_routing"}:
                 alt_anchored_proto_residual_scores_raw = self._anchored_offset_scores(
@@ -655,7 +781,7 @@ class PrototypeHead(nn.Module):
             ):
                 alt_proto_residual_scores_raw = alt_anchored_proto_residual_scores_raw
             else:
-                alt_proto_residual_scores_raw = proto_scores_raw - alt_anchor_scores_raw.unsqueeze(-1)
+                alt_proto_residual_scores_raw = proto_scores_raw - alt_full_anchor_scores_raw.unsqueeze(-1)
             if self.num_prototypes_per_class > 1:
                 alt_proto_routing_source = (
                     alt_anchored_proto_residual_scores_raw
@@ -846,6 +972,8 @@ class PrototypeHead(nn.Module):
             target_proto_probs = None
             prototype_assignments = None
             winning_proto_scores = None
+        if labels is not None and update_enabled:
+            self._update_anchor_memory(head_key, labels.to(h.device).long(), anchor_h_norm.detach())
         return {
             "logits": logits,
             "anchor_scores": anchor_scores,
@@ -859,6 +987,7 @@ class PrototypeHead(nn.Module):
             "proto_routing_scores": proto_routing_scores,
             "local_proto_routing_scores": local_proto_routing_scores,
             "local_proto_pool_weights": local_proto_pool_weights,
+            "local_slot_reliability": local_slot_reliability,
             "prototype_candidate_mask": candidate_mask,
             "anchor_path_weights": anchor_path_weights,
             "anchor_residual_path_weights": anchor_residual_path_weights,
@@ -908,6 +1037,7 @@ class PrototypeHead(nn.Module):
 
     def export_health(self, head_key: str) -> Dict[str, list | str | int]:
         prototypes, logit_scale_raw, _, counts, _, initialized = self._get_buffers(head_key)
+        _, anchor_memory_initialized = self._get_anchor_memory(head_key)
         sum_counts = counts.sum(dim=1)
         assignment_ratio = torch.where(
             sum_counts > 0,
@@ -940,6 +1070,8 @@ class PrototypeHead(nn.Module):
             "num_classes": int(prototypes.shape[0]),
             "M": int(prototypes.shape[1]),
             "initialized": initialized.detach().cpu().int().tolist(),
+            "class_anchor_memory_weight": float(self.class_anchor_memory_weight),
+            "class_anchor_memory_initialized": anchor_memory_initialized.detach().cpu().int().tolist(),
             "max_assignment_ratio": assignment_ratio.detach().cpu().tolist(),
             "n_eff": n_eff.detach().cpu().tolist(),
             "class_temperatures": class_temperatures.detach().cpu().tolist(),

@@ -43,6 +43,7 @@ def _get_cddg_sampler(args_data, dataset, mode):
 
 def _get_dg_sampler(args_data, dataset, mode):
     stratified_labels = bool(getattr(args_data, "train_label_stratified", False))
+    stratified_label_epochs = int(getattr(args_data, "train_label_stratified_epochs", 0))
     label_metadata_key = str(getattr(args_data, "label_metadata_key", "Label"))
     if mode == 'train':
         sampler = Same_system_Sampler(
@@ -51,6 +52,7 @@ def _get_dg_sampler(args_data, dataset, mode):
             shuffle=True,
             drop_last=True,
             stratified_labels=stratified_labels,
+            stratified_label_epochs=stratified_label_epochs,
             label_metadata_key=label_metadata_key,
         )
     elif mode == 'val' or mode == 'test':
