@@ -6,6 +6,33 @@ from typing import Any, Dict, Iterable, List, Mapping
 from src.utils.utils import get_num_channels, get_num_classes
 
 
+TRANSPARENT_TIME_MODULES = {"WF", "HT", "LNO", "I"}
+TRANSPARENT_FREQ_MODULES = {
+    "IdentitySpectrum",
+    "LogSpectrum",
+    "SpectralWhitening",
+    "GaussianBandMask",
+}
+TRANSPARENT_FEATURES = {
+    "Mean",
+    "Std",
+    "RMS",
+    "Kurtosis",
+    "CrestFactor",
+    "Entropy",
+    "AbsMean",
+    "Skewness",
+    "ClearanceFactor",
+    "ShapeFactor",
+}
+TRANSPARENT_FREQ_FEATURES = {
+    "BandEnergy",
+    "BandRMS",
+    "SpectralEntropy",
+    "PeakRatio",
+}
+
+
 def _as_list(value: Any, default: Iterable[str]) -> List[str]:
     if value is None:
         return list(default)
@@ -14,6 +41,18 @@ def _as_list(value: Any, default: Iterable[str]) -> List[str]:
     if isinstance(value, (list, tuple)):
         return [str(item) for item in value]
     raise ValueError(f"Expected a list-like value, got {type(value)!r}.")
+
+
+def _validate_name_list(values: Iterable[str], label: str, allowed: Iterable[str]) -> List[str]:
+    resolved = [str(value) for value in values]
+    allowed_set = {str(value) for value in allowed}
+    unexpected = sorted(value for value in resolved if value not in allowed_set)
+    if unexpected:
+        raise ValueError(
+            f"{label} contains unsupported keys: {unexpected}. "
+            f"Expected subset of {sorted(allowed_set)}."
+        )
+    return resolved
 
 
 def _infer_uniform_channels(metadata: Any) -> int:
@@ -1214,17 +1253,37 @@ def build_model_config(args_model: Any, metadata: Any) -> TFMultiProtoDGConfig:
         getattr(args_model, "transparent_backbone_modules", None),
         ["WF", "HT", "I"],
     )
+    transparent_backbone_modules = _validate_name_list(
+        transparent_backbone_modules,
+        "model.transparent_backbone_modules",
+        TRANSPARENT_TIME_MODULES,
+    )
     transparent_backbone_features = _as_list(
         getattr(args_model, "transparent_backbone_features", None),
         ["Mean", "Std", "Entropy", "RMS", "Kurtosis", "CrestFactor"],
+    )
+    transparent_backbone_features = _validate_name_list(
+        transparent_backbone_features,
+        "model.transparent_backbone_features",
+        TRANSPARENT_FEATURES,
     )
     transparent_backbone_freq_modules = _as_list(
         getattr(args_model, "transparent_backbone_freq_modules", None),
         ["IdentitySpectrum", "LogSpectrum", "SpectralWhitening", "GaussianBandMask"],
     )
+    transparent_backbone_freq_modules = _validate_name_list(
+        transparent_backbone_freq_modules,
+        "model.transparent_backbone_freq_modules",
+        TRANSPARENT_FREQ_MODULES,
+    )
     transparent_backbone_freq_features = _as_list(
         getattr(args_model, "transparent_backbone_freq_features", None),
         ["BandEnergy", "BandRMS", "SpectralEntropy", "PeakRatio"],
+    )
+    transparent_backbone_freq_features = _validate_name_list(
+        transparent_backbone_freq_features,
+        "model.transparent_backbone_freq_features",
+        TRANSPARENT_FREQ_FEATURES,
     )
     transparent_backbone_out_channels = _coerce_positive_int(
         getattr(args_model, "transparent_backbone_out_channels", 3),

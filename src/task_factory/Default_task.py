@@ -378,17 +378,43 @@ class Default_task(pl.LightningModule):
         optimizer_name = self.args_task.optimizer.lower()
         lr = self.args_task.lr
         weight_decay = getattr(self.args_task, 'weight_decay', 0.0) # 提供默认值
+        wd_prototype = getattr(self.args_task, 'weight_decay_prototype', None)
 
-        # 选择优化器
-        if optimizer_name == 'adam':
-            optimizer = torch.optim.Adam(self.parameters(), lr=lr, weight_decay=weight_decay)
-        elif optimizer_name == 'adamw':
-            optimizer = torch.optim.AdamW(self.parameters(), lr=lr, weight_decay=weight_decay)
-        elif optimizer_name == 'sgd':
-            momentum = getattr(self.args_task, 'momentum', 0.9) # SGD momentum
-            optimizer = torch.optim.SGD(self.parameters(), lr=lr, weight_decay=weight_decay, momentum=momentum)
+        # 分模块 weight decay: prototype head 用独立 wd，其余用默认 wd
+        if wd_prototype is not None:
+            proto_params = []
+            base_params = []
+            for name, param in self.named_parameters():
+                if not param.requires_grad:
+                    continue
+                if 'prototype_head' in name or 'classifier' in name:
+                    proto_params.append(param)
+                else:
+                    base_params.append(param)
+            param_groups = [
+                {'params': base_params, 'weight_decay': weight_decay},
+                {'params': proto_params, 'weight_decay': float(wd_prototype)},
+            ]
+            if optimizer_name == 'adam':
+                optimizer = torch.optim.Adam(param_groups, lr=lr)
+            elif optimizer_name == 'adamw':
+                optimizer = torch.optim.AdamW(param_groups, lr=lr)
+            elif optimizer_name == 'sgd':
+                momentum = getattr(self.args_task, 'momentum', 0.9)
+                optimizer = torch.optim.SGD(param_groups, lr=lr, momentum=momentum)
+            else:
+                raise ValueError(f"不支持的优化器: {optimizer_name}")
         else:
-            raise ValueError(f"不支持的优化器: {optimizer_name}")
+            # 选择优化器
+            if optimizer_name == 'adam':
+                optimizer = torch.optim.Adam(self.parameters(), lr=lr, weight_decay=weight_decay)
+            elif optimizer_name == 'adamw':
+                optimizer = torch.optim.AdamW(self.parameters(), lr=lr, weight_decay=weight_decay)
+            elif optimizer_name == 'sgd':
+                momentum = getattr(self.args_task, 'momentum', 0.9) # SGD momentum
+                optimizer = torch.optim.SGD(self.parameters(), lr=lr, weight_decay=weight_decay, momentum=momentum)
+            else:
+                raise ValueError(f"不支持的优化器: {optimizer_name}")
 
         # 配置学习率调度器 (如果指定)
         scheduler_config = getattr(self.args_task, 'scheduler', None)
@@ -433,3 +459,17 @@ class Default_task(pl.LightningModule):
 
         # 对于非 ReduceLROnPlateau 的调度器，返回列表形式
         return [optimizer], [{'scheduler': scheduler, 'interval': 'epoch', 'frequency': 1}]
+
+    def on_train_epoch_start(self):
+        """Linear weight decay scheduling from wd_start to wd_end over training."""
+        wd_schedule = getattr(self.args_task, 'weight_decay_schedule', None)
+        if wd_schedule == 'linear':
+            wd_end = getattr(self.args_task, 'weight_decay_end', None)
+            if wd_end is None:
+                return
+            wd_start = getattr(self.args_task, 'weight_decay', 0.0)
+            total_epochs = max(self.trainer.max_epochs, 1)
+            progress = min(self.current_epoch / max(total_epochs - 1, 1), 1.0)
+            new_wd = wd_start - (wd_start - wd_end) * progress
+            for pg in self.optimizers().param_groups:
+                pg['weight_decay'] = new_wd

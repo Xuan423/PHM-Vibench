@@ -8,13 +8,15 @@ taskset:
       source_domain_id: [1, 2]
       target_domain_id: [0]
       overrides:
-        task.label_smoothing: 0.08
+        task.label_smoothing: 0.12
         task.lr: 0.001
-        task.weight_decay: 0.001
-        trainer.num_epochs: 100
-        trainer.patience: 50
+        task.weight_decay: 0.005
+        trainer.num_epochs: 200
+        trainer.patience: 100
         model.proto_contrastive_weight: 0.05
         model.proto_contrastive_temperature: 0.3
+        model.prototype_assignment_temperature: 0.3
+        model.eval_mc_samples: 10
         model.num_prototypes_per_class: 3
     - task_id: "sys27_t1"
       description: "Target domain 1 with source domains 0 and 2 under the sys27 family defaults."
@@ -22,13 +24,15 @@ taskset:
       source_domain_id: [0, 2]
       target_domain_id: [1]
       overrides:
-        task.label_smoothing: 0.08
+        task.label_smoothing: 0.12
         task.lr: 0.001
-        task.weight_decay: 0.001
-        trainer.num_epochs: 100
-        trainer.patience: 50
+        task.weight_decay: 0.005
+        trainer.num_epochs: 200
+        trainer.patience: 100
         model.proto_contrastive_weight: 0.05
         model.proto_contrastive_temperature: 0.3
+        model.prototype_assignment_temperature: 0.3
+        model.eval_mc_samples: 10
         model.num_prototypes_per_class: 3
     - task_id: "sys27_t2"
       description: "Target domain 2 with source domains 0 and 1 under the sys27 family defaults."
@@ -36,11 +40,13 @@ taskset:
       source_domain_id: [0, 1]
       target_domain_id: [2]
       overrides:
-        task.label_smoothing: 0.08
+        task.label_smoothing: 0.12
         task.lr: 0.001
-        task.weight_decay: 0.001
-        trainer.num_epochs: 100
-        trainer.patience: 50
+        task.weight_decay: 0.005
+        trainer.num_epochs: 200
+        trainer.patience: 100
         model.proto_contrastive_weight: 0.05
         model.proto_contrastive_temperature: 0.3
+        model.prototype_assignment_temperature: 0.3
+        model.eval_mc_samples: 10
         model.num_prototypes_per_class: 3

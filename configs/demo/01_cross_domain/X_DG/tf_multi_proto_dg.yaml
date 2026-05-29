@@ -31,11 +31,11 @@ data:
 
 task:
   target_system_id: [27]
-  source_domain_id: [1,0]
-  target_domain_id: [2]
+  source_domain_id: [2,1]
+  target_domain_id: [0]
   label_smoothing: 0.05
   lr: 0.001
-  weight_decay: 0.001
+  weight_decay: 0.005
 
 model:
   name: "TF_MultiProtoDG"
@@ -70,9 +70,9 @@ model:
   structured_global_enabled: false
   role_dim: 16
   concept_dim: 64
-  num_prototypes_per_class: 3
+  num_prototypes_per_class: 5
   prototype_temperature: 0.15
-  prototype_assignment_temperature: 0.15
+  prototype_assignment_temperature: 0.3
   prototype_class_pool_mode: "logsumexp"
   prototype_class_anchor_mode: "mean"
   prototype_anchor_input: "global"
@@ -90,24 +90,24 @@ model:
   prototype_residual_score_mode: "anchored_offset"
   prototype_residual_logit_weight: 1.0
   prototype_residual_logit_mode: "agreement"
-  proto_contrastive_temperature: 0.3
+  proto_contrastive_temperature: 0.35
   proto_contrastive_positive_mode: "softmax_expectation"
   use_contrastive_head: true
   # Sys27 formal setting recovered from the stable local-off 15-seed window.
-  proto_contrastive_weight: 0.05
+  proto_contrastive_weight: 0.032
   proto_contrastive_use_scaled_scores: true
-  contrastive_warmup_epochs: 10
+  contrastive_warmup_epochs: 5
   adaptive_proto_enabled: false
   prototype_residual_warmup_epochs: 10
   prototype:
     assignment_mode: "soft_balanced"
-    balance_weight: 0.05
+    balance_weight: 0.01
   role_init_mode: "random_normal"
   cross_pool_mode: "logsumexp"
   cross_pool_tau: 0.6
   cross_self_mix: 1.0
   cross_adaptive_self_mix: false
-  prototype_logit_scale_init: 6.0
+  prototype_logit_scale_init: 4.0
   prototype_init_mode: "deterministic_anchor"
   prototype_init_scale: 0.02
   cooperative_prototypes_enabled: false

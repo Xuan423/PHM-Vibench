@@ -35,17 +35,6 @@ from src.model_factory.X_model.utils.Signal_processing import (
     WaveFilters,
 )
 
-
-SIGNAL_OPERATOR_REGISTRY = {
-    "WF": WaveFilters,
-    "HT": HilbertTransform,
-    "I": Identity,
-    "IdentitySpectrum": IdentitySpectrum,
-    "LogSpectrum": LogSpectrum,
-    "SpectralWhitening": SpectralWhitening,
-    "GaussianBandMask": GaussianBandMask,
-}
-
 FEATURE_OPERATOR_REGISTRY = {
     "Mean": MeanFeature,
     "Std": StdFeature,
@@ -93,6 +82,138 @@ class _CustomBatchNorm(nn.Module):
             self.running_var = (1 - self.eps) * self.running_var + self.eps * var
             return (x - mean) / (var.sqrt() + self.eps)
         return (x - self.running_mean) / (self.running_var.sqrt() + self.eps)
+
+
+class _LaplaceNeuralOperator(nn.Module):
+    """Laplace-domain neural operator for the transparent time backbone.
+
+    This is intentionally local to TF_MultiProtoDG's transparent backbone so LNO
+    follows the same registry/forward path as HT and WF without depending on the
+    standalone TSPN model wiring.
+    """
+
+    def __init__(self, args) -> None:
+        super().__init__()
+        self.name = "LNO"
+        self.channels = max(1, int(getattr(args, "scale", 1)))
+        self.modes = max(1, self.channels * self.channels)
+        init_scale = 1.0 / float(max(self.channels * self.channels, 1))
+        self.weights_pole = nn.Parameter(
+            init_scale
+            * torch.rand(
+                self.channels,
+                self.channels,
+                self.modes,
+                dtype=torch.cfloat,
+            )
+        )
+        self.weights_residue = nn.Parameter(
+            init_scale
+            * torch.rand(
+                self.channels,
+                self.channels,
+                self.modes,
+                dtype=torch.cfloat,
+            )
+        )
+
+    def reset_deterministic_(self) -> None:
+        idx = torch.arange(
+            self.channels * self.channels * self.modes,
+            device=self.weights_pole.device,
+            dtype=torch.float32,
+        ).view(self.channels, self.channels, self.modes)
+        init_scale = 1.0 / float(max(self.channels * self.channels, 1))
+        pole = torch.complex(torch.cos(idx), torch.sin(idx)) * init_scale
+        residue = torch.complex(torch.sin(idx + 1.0), torch.cos(idx + 1.0)) * init_scale
+        with torch.no_grad():
+            self.weights_pole.copy_(pole.to(dtype=self.weights_pole.dtype))
+            self.weights_residue.copy_(residue.to(dtype=self.weights_residue.dtype))
+
+    @staticmethod
+    def _safe_divide(numerator: torch.Tensor, denominator: torch.Tensor) -> torch.Tensor:
+        eps = torch.as_tensor(1e-6, device=denominator.device, dtype=denominator.real.dtype)
+        safe_denominator = torch.where(
+            denominator.abs() < eps,
+            denominator + eps.to(dtype=denominator.dtype),
+            denominator,
+        )
+        return numerator / safe_denominator
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Current transparent backbone operators use B,L,C tensors.
+        if x.ndim != 3:
+            raise ValueError(f"LNO expects a B,L,C tensor, got shape={tuple(x.shape)}.")
+        _, length, channels = x.shape
+        if channels > self.channels:
+            raise ValueError(
+                f"LNO was initialized for at most {self.channels} channels, got {channels}."
+            )
+        if length <= 1:
+            return x
+
+        x_bcl = rearrange(x, "b l c -> b c l")
+        real_dtype = x_bcl.dtype
+        complex_dtype = torch.complex128 if real_dtype == torch.float64 else torch.complex64
+        alpha = torch.fft.fft(x_bcl, dim=-1)
+
+        pole = self.weights_pole[:channels, :channels, :].to(
+            device=x.device,
+            dtype=complex_dtype,
+        )
+        residue = self.weights_residue[:channels, :channels, :].to(
+            device=x.device,
+            dtype=complex_dtype,
+        )
+        # Bound the transient exponent's real component to avoid numerical blowups
+        # while keeping the learned complex pole/residue parameterization intact.
+        pole_for_exp = torch.complex(
+            pole.real.clamp(min=-8.0, max=8.0),
+            pole.imag.clamp(min=-64.0, max=64.0),
+        )
+
+        dt = 1.0 / float(length - 1)
+        lambda_freq = torch.fft.fftfreq(
+            length,
+            d=dt,
+            device=x.device,
+            dtype=real_dtype,
+        )
+        lambda1 = (lambda_freq * (2.0 * math.pi)).to(dtype=complex_dtype) * 1j
+        lambda1 = lambda1.view(length, 1, 1, 1)
+        denominator = lambda1 - pole.view(1, channels, channels, self.modes)
+        transfer = self._safe_divide(
+            residue.view(1, channels, channels, self.modes),
+            denominator,
+        )
+
+        output_residue_freq = torch.einsum("bix,xiok->box", alpha, transfer)
+        output_residue_modes = torch.einsum("bix,xiok->bok", alpha, -transfer)
+
+        transient = torch.fft.ifft(output_residue_freq, n=length, dim=-1).real
+        t = torch.linspace(0.0, 1.0, steps=length, device=x.device, dtype=real_dtype)
+        response = torch.exp(
+            pole_for_exp.unsqueeze(-1)
+            * t.to(dtype=complex_dtype).view(1, 1, 1, length)
+        )
+        steady = torch.einsum("bix,ioxz->boz", output_residue_modes, response).real
+        steady = steady / float(length)
+
+        out = transient + steady
+        out = torch.nan_to_num(out, nan=0.0, posinf=1e4, neginf=-1e4)
+        return rearrange(out.to(dtype=x.dtype), "b c l -> b l c")
+
+
+SIGNAL_OPERATOR_REGISTRY = {
+    "WF": WaveFilters,
+    "HT": HilbertTransform,
+    "LNO": _LaplaceNeuralOperator,
+    "I": Identity,
+    "IdentitySpectrum": IdentitySpectrum,
+    "LogSpectrum": LogSpectrum,
+    "SpectralWhitening": SpectralWhitening,
+    "GaussianBandMask": GaussianBandMask,
+}
 
 
 class _SignalProcessingLayer(nn.Module):
@@ -223,7 +344,8 @@ class TransparentGlobalBackbone(nn.Module):
             ).to(self.args.device)
             if out_channels % max(layer.module_num, 1) != 0:
                 raise ValueError(
-                    f"transparent out_channels={out_channels} must be divisible by module_num={layer.module_num}"
+                    f"transparent out_channels={out_channels} must be divisible "
+                    f"by module_num={layer.module_num}"
                 )
             self.signal_processing_layers.append(layer)
             in_channels = out_channels
@@ -238,7 +360,9 @@ class TransparentGlobalBackbone(nn.Module):
             norm_eps=float(getattr(self.args, "feature_norm_eps", 1e-5)),
         ).to(self.args.device)
         self.feature_extractor_layers = layer
-        self.channel_for_classifier = int(self.channel_for_feature * len(self.feature_extractor_modules))
+        self.channel_for_classifier = int(
+            self.channel_for_feature * len(self.feature_extractor_modules)
+        )
 
     @staticmethod
     def _dct_weight(
@@ -283,6 +407,8 @@ class TransparentGlobalBackbone(nn.Module):
             if layer.skip_connection is not None:
                 self._deterministic_linear_(layer.skip_connection, gain=0.5)
             for module in layer.signal_processing_modules.values():
+                if hasattr(module, "reset_deterministic_"):
+                    module.reset_deterministic_()
                 if hasattr(module, "f_c") and hasattr(module, "f_b"):
                     channels = int(module.f_c.numel())
                     center_low = 0.05
