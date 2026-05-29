@@ -65,7 +65,7 @@ SUPPORTED_SYSTEM_PRESETS: Dict[int, SystemFamilyPreset] = {
         default_weight_decay=0.0001,
         default_num_epochs=100,
         default_patience=50,
-        default_proto_contrastive_weight=0.05,
+        default_proto_contrastive_weight=0.1,
         default_num_prototypes_per_class=4,
     ),
     21: SystemFamilyPreset(
@@ -89,7 +89,7 @@ SUPPORTED_SYSTEM_PRESETS: Dict[int, SystemFamilyPreset] = {
         default_weight_decay=0.0001,
         default_num_epochs=100,
         default_patience=50,
-        default_proto_contrastive_weight=0.05,
+        default_proto_contrastive_weight=0.1,
         default_num_prototypes_per_class=4,
     ),
 }

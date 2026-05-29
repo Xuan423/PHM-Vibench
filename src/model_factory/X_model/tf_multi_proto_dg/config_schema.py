@@ -270,9 +270,10 @@ class TFMultiProtoDGConfig:
     prototype_anchor_score_mode: str = "full"
     prototype_anchor_input: str = "global"
     prototype_concept_input: str = "h"
+    prototype_decision_output: str = "joint"
     prototype_assignment_input: str = "concept"
     local_prototype_concept_source: str = "role"
-    local_anomaly_residual_mode: str = "direct"
+    local_anomaly_residual_mode: str = "mlp"
     local_anomaly_gate_mode: str = "cross_focus"
     semantic_residual_init: str = "anomaly_zero"
     global_semantic_refiner_mode: str = "full"
@@ -580,12 +581,17 @@ def build_model_config(args_model: Any, metadata: Any) -> TFMultiProtoDGConfig:
     prototype_concept_input = _validate_choice(
         str(getattr(args_model, "prototype_concept_input", "h")),
         "model.prototype_concept_input",
-        {"h", "core", "local_anomaly", "relative", "dual_relative", "dual_relative_learned"},
+        {"h", "core", "anchor_global", "global_residual"},
+    )
+    prototype_decision_output = _validate_choice(
+        str(getattr(args_model, "prototype_decision_output", "joint")),
+        "model.prototype_decision_output",
+        {"joint", "anchor_only"},
     )
     prototype_assignment_input = _validate_choice(
         str(getattr(args_model, "prototype_assignment_input", "concept")),
         "model.prototype_assignment_input",
-        {"concept", "local_anomaly"},
+        {"concept"},
     )
     local_prototype_concept_source = _validate_choice(
         str(getattr(args_model, "local_prototype_concept_source", "role")),
@@ -593,9 +599,9 @@ def build_model_config(args_model: Any, metadata: Any) -> TFMultiProtoDGConfig:
         {"role", "profile_strength"},
     )
     local_anomaly_residual_mode = _validate_choice(
-        str(getattr(args_model, "local_anomaly_residual_mode", "direct")),
+        str(getattr(args_model, "local_anomaly_residual_mode", "mlp")),
         "model.local_anomaly_residual_mode",
-        {"direct", "direct_delta", "off", "mlp"},
+        {"off", "mlp", "mlp_inert"},
     )
     local_anomaly_gate_mode = _validate_choice(
         str(getattr(args_model, "local_anomaly_gate_mode", "cross_focus")),
@@ -648,21 +654,13 @@ def build_model_config(args_model: Any, metadata: Any) -> TFMultiProtoDGConfig:
             "static",
             "agreement",
             "agreement_tf_balance",
-            "local_evidence",
-            "agreement_local_centered",
-            "agreement_local_slot_verify",
-            "local_competition",
-            "global_local_consensus",
-            "agreement_global_local_consensus",
             "agreement_anchor_support",
             "anchor_prior",
             "agreement_anchor_prior",
             "anchor_uncertainty_centered",
             "agreement_anchor_uncertainty_centered",
-            "agreement_candidate_centered",
             "anchor_residual_margin_mix",
             "agreement_anchor_residual_margin_mix",
-            "agreement_candidate_margin_mix",
         },
     )
     adaptive_class_temperature_enabled = bool(
@@ -834,8 +832,6 @@ def build_model_config(args_model: Any, metadata: Any) -> TFMultiProtoDGConfig:
             "semantic_stats_mlp",
             "semantic_tokens_attn",
             "semantic_tokens_query",
-            "local_anomaly_summary",
-            "local_anomaly_profile",
             "structured_masked",
             "structured_topk",
         },
@@ -1481,6 +1477,7 @@ def build_model_config(args_model: Any, metadata: Any) -> TFMultiProtoDGConfig:
         prototype_anchor_score_mode=prototype_anchor_score_mode,
         prototype_anchor_input=prototype_anchor_input,
         prototype_concept_input=prototype_concept_input,
+        prototype_decision_output=prototype_decision_output,
         prototype_assignment_input=prototype_assignment_input,
         local_prototype_concept_source=local_prototype_concept_source,
         local_anomaly_residual_mode=local_anomaly_residual_mode,

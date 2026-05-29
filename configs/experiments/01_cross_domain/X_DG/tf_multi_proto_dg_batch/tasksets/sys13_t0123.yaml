@@ -13,7 +13,7 @@ taskset:
         task.weight_decay: 0.0001
         trainer.num_epochs: 100
         trainer.patience: 50
-        model.proto_contrastive_weight: 0.05
+        model.proto_contrastive_weight: 0.1
         model.proto_contrastive_temperature: 0.3
         model.num_prototypes_per_class: 4
     - task_id: "sys13_t1"
@@ -27,7 +27,7 @@ taskset:
         task.weight_decay: 0.0001
         trainer.num_epochs: 100
         trainer.patience: 50
-        model.proto_contrastive_weight: 0.05
+        model.proto_contrastive_weight: 0.1
         model.proto_contrastive_temperature: 0.3
         model.num_prototypes_per_class: 4
     - task_id: "sys13_t2"
@@ -41,7 +41,7 @@ taskset:
         task.weight_decay: 0.0001
         trainer.num_epochs: 100
         trainer.patience: 50
-        model.proto_contrastive_weight: 0.05
+        model.proto_contrastive_weight: 0.1
         model.proto_contrastive_temperature: 0.3
         model.num_prototypes_per_class: 4
     - task_id: "sys13_t3"
@@ -55,6 +55,6 @@ taskset:
         task.weight_decay: 0.0001
         trainer.num_epochs: 100
         trainer.patience: 50
-        model.proto_contrastive_weight: 0.05
+        model.proto_contrastive_weight: 0.1
         model.proto_contrastive_temperature: 0.3
         model.num_prototypes_per_class: 4

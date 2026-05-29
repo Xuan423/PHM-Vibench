@@ -12,13 +12,13 @@ base_configs:
 
 environment:
   project: "demo_tf_multi_proto_dg_sys27_sys21_family"
-  seed: 42
+  seed: 19
   iterations: 5
   # Optional: fix model parameter initialization across iterations while keeping
   # per-iteration data/sampler randomness (set null to disable).
   model_init_seed: null
   output_dir: "results/demo/tf_multi_proto_dg_sys27_sys21_family"
-  notes: "TF_MultiProtoDG v4.3 timedual mainline: deep-global time evidence fuses learned and deterministic semantic bases, frequency keeps enhanced deep-global processing, and joint multi-prototype contrast uses anchored agreement residuals. No domain shortcut, no fixed model seed."
+  notes: "TF_MultiProtoDG v4.1-restored clean-decision mainline: final logits use global class-anchor evidence only; local anomaly residual MLP remains as a training scaffold for the fused concept and prototype geometry. Local slot verification, local prototype routing, and local classifier branches stay disabled. No domain shortcut, no fixed model seed."
 
 data:
   batch_size: 64
@@ -31,11 +31,11 @@ data:
 
 task:
   target_system_id: [27]
-  source_domain_id: [0,1]
+  source_domain_id: [1,0]
   target_domain_id: [2]
-  label_smoothing: 0.08
+  label_smoothing: 0.05
   lr: 0.001
-  weight_decay: 0.0003
+  weight_decay: 0.001
 
 model:
   name: "TF_MultiProtoDG"
@@ -77,19 +77,24 @@ model:
   prototype_class_anchor_mode: "mean"
   prototype_anchor_input: "global"
   prototype_concept_input: "h"
+  # Clean decision boundary: train/evaluate the public classifier with global
+  # class-anchor logits. The fused h path remains available to the prototype
+  # contrastive scaffold, but residual/local prototype evidence cannot vote.
+  prototype_decision_output: "anchor_only"
   prototype_assignment_input: "concept"
+  # Required by the v4.1-level sys27 formal runs: this residual stabilizes the
+  # fused concept h, but local slot verification and local routing remain off.
   local_anomaly_residual_mode: "mlp"
   local_anomaly_gate_mode: "cross_focus"
   semantic_residual_init: "zero"
   prototype_residual_score_mode: "anchored_offset"
   prototype_residual_logit_weight: 1.0
-  prototype_residual_logit_mode: "agreement_local_slot_verify"
-  proto_contrastive_temperature: 0.2
+  prototype_residual_logit_mode: "agreement"
+  proto_contrastive_temperature: 0.3
   proto_contrastive_positive_mode: "softmax_expectation"
   use_contrastive_head: true
-  # T0 no-trick mainline: keep prototype contrastive always-on and disable
-  # adaptive target heuristics for cross-dataset portability.
-  proto_contrastive_weight: 0.1
+  # Sys27 formal setting recovered from the stable local-off 15-seed window.
+  proto_contrastive_weight: 0.05
   proto_contrastive_use_scaled_scores: true
   contrastive_warmup_epochs: 10
   adaptive_proto_enabled: false
@@ -117,6 +122,6 @@ trainer:
   gpus: 1
   device: "cuda"
   monitor: "val_total_loss"
-  num_epochs: 100
-  patience: 50
+  num_epochs: 200
+  patience: 100
   save_last: false

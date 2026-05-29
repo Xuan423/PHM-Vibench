@@ -99,21 +99,13 @@ class PrototypeHead(nn.Module):
             "static",
             "agreement",
             "agreement_tf_balance",
-            "local_evidence",
-            "agreement_local_centered",
-            "agreement_local_slot_verify",
-            "local_competition",
-            "global_local_consensus",
-            "agreement_global_local_consensus",
             "agreement_anchor_support",
             "anchor_prior",
             "agreement_anchor_prior",
             "anchor_uncertainty_centered",
             "agreement_anchor_uncertainty_centered",
-            "agreement_candidate_centered",
             "anchor_residual_margin_mix",
             "agreement_anchor_residual_margin_mix",
-            "agreement_candidate_margin_mix",
         }:
             raise ValueError(
                 f"Unsupported residual_logit_mode={self.residual_logit_mode!r}."
@@ -538,8 +530,6 @@ class PrototypeHead(nn.Module):
         alternative_anchor_h: torch.Tensor | None = None,
         anchor_mix_mode: str = "adaptive_margin",
         residual_logit_weight: torch.Tensor | None = None,
-        routing_h: torch.Tensor | None = None,
-        candidate_competition: bool = False,
     ) -> Dict[str, torch.Tensor]:
         prototypes, logit_scale_raw, class_bias, _, _, _ = self._get_buffers(head_key)
         tau = max(float(self.temperature), 1e-6)
@@ -569,146 +559,28 @@ class PrototypeHead(nn.Module):
             and anchored_proto_residual_scores_raw is not None
             else proto_residual_scores_raw
         )
-        if routing_h is not None:
-            routing_h_norm = F.normalize(routing_h, dim=-1)
-            local_proto_scores_raw = torch.einsum("bd,nkd->bnk", routing_h_norm, proto_norm)
-            local_anchor_scores_raw = torch.einsum("bd,nd->bn", routing_h_norm, class_anchor)
-            anchored_local_proto_residual_scores_raw = None
-            if self.residual_score_mode in {"anchored_offset", "anchored_routing"} and anchor_h is not None:
-                anchored_local_proto_residual_scores_raw = self._anchored_offset_scores(
-                    routing_h_norm,
-                    anchor_h_norm,
-                    proto_norm,
-                    class_anchor,
-                )
-            if (
-                self.residual_score_mode == "anchored_offset"
-                and anchored_local_proto_residual_scores_raw is not None
-            ):
-                local_proto_residual_scores_raw = anchored_local_proto_residual_scores_raw
-            else:
-                local_proto_residual_scores_raw = (
-                    local_proto_scores_raw - local_anchor_scores_raw.unsqueeze(-1)
-                )
-            routing_local_proto_residual_scores_raw = (
-                anchored_local_proto_residual_scores_raw
-                if self.residual_score_mode in {"anchored_offset", "anchored_routing"}
-                and anchored_local_proto_residual_scores_raw is not None
-                else local_proto_residual_scores_raw
-            )
-        else:
-            local_proto_residual_scores_raw = proto_residual_scores_raw
-            routing_local_proto_residual_scores_raw = routing_proto_residual_scores_raw
         if self.num_prototypes_per_class > 1:
             proto_routing_mean = routing_proto_residual_scores_raw.mean(dim=-1, keepdim=True)
             proto_routing_centered = routing_proto_residual_scores_raw - proto_routing_mean
             proto_routing_scale = proto_routing_centered.pow(2).mean(dim=-1, keepdim=True).add(1e-6).sqrt()
             proto_routing_scores = proto_routing_centered / proto_routing_scale
-            local_proto_routing_mean = routing_local_proto_residual_scores_raw.mean(dim=-1, keepdim=True)
-            local_proto_routing_centered = routing_local_proto_residual_scores_raw - local_proto_routing_mean
-            local_proto_routing_scale = (
-                local_proto_routing_centered.pow(2).mean(dim=-1, keepdim=True).add(1e-6).sqrt()
-            )
-            local_proto_routing_scores = local_proto_routing_centered / local_proto_routing_scale
         else:
             proto_routing_scores = torch.zeros_like(proto_residual_scores_raw)
-            local_proto_routing_scores = torch.zeros_like(local_proto_residual_scores_raw)
         logit_scale = F.softplus(logit_scale_raw) + 1e-4
         anchor_scores = logit_scale * anchor_scores_raw
         proto_scores = logit_scale * proto_residual_scores_raw
-        local_proto_scores = logit_scale * local_proto_residual_scores_raw
         class_effective_k_bias, class_effective_k = self._class_effective_k_bias(
             head_key,
             h.device,
             proto_scores.dtype,
         )
         proto_scores_logits = proto_scores + class_effective_k_bias.unsqueeze(0)
-        local_proto_scores_logits = local_proto_scores + class_effective_k_bias.unsqueeze(0)
         class_neff = self._class_neff(head_key, h.device, proto_scores.dtype)
         class_temperatures = self._class_temperatures(head_key, h.device, proto_scores.dtype)
         pooled_residual = self._pool_class_residual(proto_scores_logits, class_temperatures)
         candidate_mask = torch.ones_like(pooled_residual)
         anchor_residual_path_weights = None
         residual_anchor_support_gate = None
-        local_proto_pool_weights = torch.softmax(local_proto_routing_scores / assign_tau, dim=-1)
-        local_pooled_residual = torch.sum(local_proto_pool_weights * local_proto_scores_logits, dim=-1)
-        local_slot_reliability = None
-        candidate_centered = (
-            self.residual_logit_mode
-            in {
-                "local_evidence",
-                "local_competition",
-                "agreement_candidate_centered",
-                "agreement_candidate_margin_mix",
-            }
-            or (
-                candidate_competition
-                and self.residual_logit_mode != "agreement_local_centered"
-            )
-        )
-        if self.residual_logit_mode == "local_evidence":
-            # Global anchor supplies class semantics; local abnormal evidence only
-            # explains residual differences among anchor-plausible candidates.
-            proto_residual_scores_raw = local_proto_residual_scores_raw
-            proto_scores = local_proto_scores
-            proto_scores_logits = local_proto_scores_logits
-            proto_routing_scores = local_proto_routing_scores
-            pooled_residual = local_pooled_residual
-        elif self.residual_logit_mode == "agreement_local_centered":
-            # Keep the global anchor as the class-level prior while allowing
-            # local abnormal evidence to correct any class through a centered
-            # residual. This avoids hard top-k exclusion by the anchor path.
-            pooled_residual = local_pooled_residual - local_pooled_residual.mean(
-                dim=1,
-                keepdim=True,
-            )
-        elif self.residual_logit_mode in {
-            "global_local_consensus",
-            "agreement_global_local_consensus",
-        }:
-            # Single interpretable prototype residual path:
-            # global/fused evidence and local abnormal evidence are expressed in
-            # the same prototype-offset coordinates and averaged before class
-            # pooling. The class anchor remains purely global; local evidence can
-            # only explain centered class-internal deviations around that anchor.
-            proto_residual_scores_raw = 0.5 * (
-                proto_residual_scores_raw + local_proto_residual_scores_raw
-            )
-            proto_scores = 0.5 * (proto_scores + local_proto_scores)
-            proto_scores_logits = 0.5 * (proto_scores_logits + local_proto_scores_logits)
-            proto_routing_scores = 0.5 * (proto_routing_scores + local_proto_routing_scores)
-            pooled_residual = self._pool_class_residual(proto_scores_logits, class_temperatures)
-            pooled_residual = pooled_residual - pooled_residual.mean(
-                dim=1,
-                keepdim=True,
-            )
-        elif self.residual_logit_mode == "agreement_local_slot_verify":
-            # Local abnormal evidence is not a class classifier. It verifies
-            # whether the same within-class prototype slot is supported by the
-            # global/fused route and the localized anomaly route.
-            if self.num_prototypes_per_class > 1:
-                global_slot_probs = torch.softmax(proto_routing_scores / assign_tau, dim=-1)
-                local_slot_probs = torch.softmax(local_proto_routing_scores / assign_tau, dim=-1)
-                slot_alignment = float(self.num_prototypes_per_class) * (
-                    global_slot_probs * local_slot_probs
-                ).sum(dim=-1)
-                local_slot_reliability = slot_alignment / slot_alignment.mean(
-                    dim=1,
-                    keepdim=True,
-                ).clamp_min(1e-6)
-            else:
-                local_slot_reliability = torch.ones_like(pooled_residual)
-        if candidate_centered and pooled_residual.shape[1] > 1:
-            top_count = min(2, int(pooled_residual.shape[1]))
-            top_indices = anchor_scores.topk(k=top_count, dim=1).indices
-            candidate_mask = torch.zeros_like(pooled_residual)
-            candidate_mask.scatter_(1, top_indices, 1.0)
-            candidate_count = candidate_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
-            candidate_mean = (local_pooled_residual * candidate_mask).sum(
-                dim=1,
-                keepdim=True,
-            ) / candidate_count
-            pooled_residual = (local_pooled_residual - candidate_mean) * candidate_mask
         residual_weight = (
             pooled_residual.new_tensor(float(self.residual_logit_weight))
             if residual_logit_weight is None
@@ -736,12 +608,9 @@ class PrototypeHead(nn.Module):
             ).clamp(0.0, 1.0)
             residual_weight = residual_weight * residual_anchor_support_gate
         residual_evidence = residual_weight * pooled_residual
-        if local_slot_reliability is not None:
-            residual_evidence = residual_evidence * local_slot_reliability
         if self.residual_logit_mode in {
             "anchor_residual_margin_mix",
             "agreement_anchor_residual_margin_mix",
-            "agreement_candidate_margin_mix",
         }:
             # Interpretability-preserving evidence fusion: the class anchor and
             # the prototype residual remain separate evidence paths.  The final
@@ -924,13 +793,7 @@ class PrototypeHead(nn.Module):
         gather_index = target_class_ids.view(-1, 1, 1).expand(-1, 1, self.num_prototypes_per_class)
         target_proto_scores = proto_scores.gather(1, gather_index).squeeze(1)
         target_proto_scores_raw = proto_residual_scores_raw.gather(1, gather_index).squeeze(1)
-        if routing_h is not None:
-            # Prototype identity should be supported by both the global concept
-            # route and the local abnormal evidence route. Local evidence is a
-            # correction signal, not a replacement classifier.
-            assignment_routing_scores = 0.5 * (proto_routing_scores + local_proto_routing_scores)
-        else:
-            assignment_routing_scores = proto_routing_scores
+        assignment_routing_scores = proto_routing_scores
         target_proto_routing_scores = assignment_routing_scores.gather(1, gather_index).squeeze(1)
         target_anchor_scores = anchor_scores.gather(1, target_class_ids.view(-1, 1)).squeeze(1)
         if assignment_enabled:
@@ -985,9 +848,6 @@ class PrototypeHead(nn.Module):
             "proto_residual_scores_raw": proto_residual_scores_raw,
             "pooled_residual_scores": pooled_residual,
             "proto_routing_scores": proto_routing_scores,
-            "local_proto_routing_scores": local_proto_routing_scores,
-            "local_proto_pool_weights": local_proto_pool_weights,
-            "local_slot_reliability": local_slot_reliability,
             "prototype_candidate_mask": candidate_mask,
             "anchor_path_weights": anchor_path_weights,
             "anchor_residual_path_weights": anchor_residual_path_weights,

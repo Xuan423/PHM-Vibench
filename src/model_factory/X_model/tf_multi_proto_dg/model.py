@@ -441,10 +441,14 @@ class Model(nn.Module):
             # evidence-quality coordinates are reliable.
             self.evidence_path_gate_weight = nn.Parameter(torch.zeros(4, 2))
         self.local_anomaly_residual_mode = str(
-            getattr(self.config, "local_anomaly_residual_mode", "direct")
+            getattr(self.config, "local_anomaly_residual_mode", "mlp")
         )
-        self.anomaly_residual_norm = nn.LayerNorm(self.config.concept_dim)
-        if self.local_anomaly_residual_mode in {"mlp", "direct_delta"}:
+        self.anomaly_residual_norm = (
+            None
+            if self.local_anomaly_residual_mode == "off"
+            else nn.LayerNorm(self.config.concept_dim)
+        )
+        if self.local_anomaly_residual_mode in {"mlp", "mlp_inert"}:
             self.anomaly_residual_proj = nn.Linear(
                 self.config.concept_dim,
                 self.config.concept_dim,
@@ -684,22 +688,6 @@ class Model(nn.Module):
                 self.raw_feature_residual_activation = nn.GELU()
                 self.raw_feature_residual_proj = nn.Linear(
                     semantic_hidden_dim,
-                    self.config.concept_dim,
-                    bias=False,
-                )
-            elif self.residual_input_mode == "local_anomaly_summary":
-                residual_proj_in_dim = int(self.local_anomaly_summary_dim)
-                self.raw_feature_residual_norm = nn.LayerNorm(residual_proj_in_dim)
-                self.raw_feature_residual_proj = nn.Linear(
-                    residual_proj_in_dim,
-                    self.config.concept_dim,
-                    bias=False,
-                )
-            elif self.residual_input_mode == "local_anomaly_profile":
-                residual_proj_in_dim = int(self.local_anomaly_profile_dim)
-                self.raw_feature_residual_norm = nn.LayerNorm(residual_proj_in_dim)
-                self.raw_feature_residual_proj = nn.Linear(
-                    residual_proj_in_dim,
                     self.config.concept_dim,
                     bias=False,
                 )
@@ -1750,10 +1738,6 @@ class Model(nn.Module):
                 residual_source = h_raw_global_feature
             elif residual_input in {"semantic_stats", "semantic_stats_mlp"}:
                 residual_source = h_raw_semantic_stats
-            elif residual_input == "local_anomaly_summary":
-                residual_source = h_raw_local_anomaly_summary
-            elif residual_input == "local_anomaly_profile":
-                residual_source = h_raw_local_anomaly_profile
             elif residual_input == "raw_feature_topk":
                 residual_source = h_raw_full
                 topk = self.raw_feature_residual_topk
@@ -2225,16 +2209,12 @@ class Model(nn.Module):
         alternative_anchor_concept: Optional[torch.Tensor] = None,
         anchor_mix_mode: str = "adaptive_margin",
         residual_logit_weight: Optional[torch.Tensor] = None,
-        routing_concept: Optional[torch.Tensor] = None,
-        candidate_competition: bool = False,
     ) -> Dict[str, torch.Tensor]:
         concept = torch.nan_to_num(concept)
         if anchor_concept is not None:
             anchor_concept = torch.nan_to_num(anchor_concept)
         if alternative_anchor_concept is not None:
             alternative_anchor_concept = torch.nan_to_num(alternative_anchor_concept)
-        if routing_concept is not None:
-            routing_concept = torch.nan_to_num(routing_concept)
         proto_out = head(
             concept,
             labels=labels,
@@ -2245,8 +2225,6 @@ class Model(nn.Module):
             alternative_anchor_h=alternative_anchor_concept,
             anchor_mix_mode=anchor_mix_mode,
             residual_logit_weight=residual_logit_weight,
-            routing_h=routing_concept,
-            candidate_competition=bool(candidate_competition),
         )
         return {f"{prefix}_{key}": value for key, value in proto_out.items()}
 
@@ -2446,10 +2424,12 @@ class Model(nn.Module):
             "local_global_disagreement",
             "anomaly_alignment_gate",
             "h_global_deep_gate",
+            "global_structured_disagreement",
             "transparent_time_basis_mix",
             "transparent_freq_alt_mix",
             "h_core_semantic_cross_gate",
             "h_anchor_semantic_cross_gate",
+            "h_global_residual_semantic_cross_gate",
             "h_proto_local_semantic_cross_gate",
         ):
             value = extras.get(metric_name)
@@ -2478,12 +2458,6 @@ class Model(nn.Module):
             metrics["decision_residual_anchor_support_gate"] = (
                 residual_anchor_support_gate.to(logits.device).mean()
             )
-        local_slot_reliability = extras.get("local_slot_reliability")
-        if torch.is_tensor(local_slot_reliability):
-            reliability = local_slot_reliability.to(logits.device)
-            metrics["decision_local_slot_reliability_mean"] = reliability.mean()
-            metrics["decision_local_slot_reliability_std"] = reliability.std()
-
     def _encode_structured(
         self,
         x: torch.Tensor,
@@ -2804,7 +2778,23 @@ class Model(nn.Module):
         # Fixed semantic coordinates avoid seed-sensitive learned pair projections.
         # Coordinates: time summary, frequency summary, T-F concordance, local/global gap.
         h_global_pair_raw = torch.cat([g_t, g_f], dim=-1)
+        g_t_struct_anchor = torch.nan_to_num(
+            g_t_global_structured + self.time_role_refiner(g_t_global_structured)
+        )
+        g_f_struct_anchor = torch.nan_to_num(
+            g_f_global_structured + self.freq_role_refiner(g_f_global_structured)
+        )
         if int(self.config.concept_dim) == 4 * int(self.config.role_dim):
+            global_residual_gap = 0.5 * (
+                F.layer_norm(
+                    g_t_anchor - g_t_struct_anchor,
+                    (int(g_t_anchor.shape[-1]),),
+                )
+                + F.layer_norm(
+                    g_f_anchor - g_f_struct_anchor,
+                    (int(g_f_anchor.shape[-1]),),
+                )
+            )
             h_core_base = torch.cat(
                 [
                     g_t,
@@ -2823,27 +2813,56 @@ class Model(nn.Module):
                 ],
                 dim=-1,
             )
+            h_global_residual_base = torch.cat(
+                [
+                    g_t_anchor,
+                    g_f_anchor,
+                    F.layer_norm(
+                        g_t_anchor * g_f_anchor,
+                        (int(g_t_anchor.shape[-1]),),
+                    ),
+                    global_residual_gap,
+                ],
+                dim=-1,
+            )
         elif int(self.config.concept_dim) == 2 * int(self.config.role_dim):
             h_core_base = h_global_pair_raw
             h_anchor_base = torch.cat([g_t_anchor, g_f_anchor], dim=-1)
+            h_global_residual_base = torch.cat([g_t_anchor, g_f_anchor], dim=-1)
+            global_residual_gap = torch.zeros_like(g_t_anchor)
         else:
             raise ValueError(
                 "Fixed TF concept coordinates require concept_dim to equal "
                 "2 * role_dim or 4 * role_dim."
             )
-        h_core_base, h_anchor_base, h_proto_local_raw = self._concept_segment_norm(
+        (
             h_core_base,
             h_anchor_base,
+            h_global_residual_base,
+            h_proto_local_raw,
+        ) = self._concept_segment_norm(
+            h_core_base,
+            h_anchor_base,
+            h_global_residual_base,
             h_proto_local_raw,
         )
-        h_core_base, h_anchor_base, h_proto_local_raw = self._concept_segment_dropout(
+        (
             h_core_base,
             h_anchor_base,
+            h_global_residual_base,
+            h_proto_local_raw,
+        ) = self._concept_segment_dropout(
+            h_core_base,
+            h_anchor_base,
+            h_global_residual_base,
             h_proto_local_raw,
         )
         h_core_semantic, h_core_semantic_gate = self._refine_global_semantic(h_core_base)
         h_anchor_semantic, h_anchor_semantic_gate = self._refine_anchor_semantic(
             h_anchor_base
+        )
+        h_global_residual_semantic, h_global_residual_semantic_gate = (
+            self._refine_global_semantic(h_global_residual_base)
         )
         h_anchor_semantic_alt = None
         if str(getattr(self.config, "global_anchor_refiner_mode", "shared")) == "segment_consensus":
@@ -2901,20 +2920,17 @@ class Model(nn.Module):
             anomaly_residual = self.anomaly_residual_proj(
                 self.anomaly_residual_norm(anomaly_source)
             )
-        elif self.local_anomaly_residual_mode == "direct_delta":
+        elif self.local_anomaly_residual_mode == "mlp_inert":
             if self.anomaly_residual_proj is None:
-                raise RuntimeError("anomaly_residual_proj is required for direct_delta residual mode.")
-            anomaly_direct = self.anomaly_residual_norm(anomaly_source)
-            anomaly_delta = self.anomaly_residual_proj(anomaly_direct)
-            anomaly_residual = F.layer_norm(
-                anomaly_direct + anomaly_delta,
-                (int(anomaly_direct.shape[-1]),),
+                raise RuntimeError("anomaly_residual_proj is required for mlp_inert residual mode.")
+            anomaly_residual_raw = self.anomaly_residual_proj(
+                self.anomaly_residual_norm(anomaly_source)
             )
+            anomaly_residual = anomaly_residual_raw * 0.0
         else:
-            # Direct mode keeps local abnormal evidence in the same fixed
-            # T/F semantic coordinates as the global concept, avoiding a
-            # seed-sensitive random projection as a second decision path.
-            anomaly_residual = self.anomaly_residual_norm(anomaly_source)
+            raise ValueError(
+                f"Unsupported local_anomaly_residual_mode={self.local_anomaly_residual_mode!r}."
+            )
         cross_focus = 0.5 * (hierarchical["time_focus"] + hierarchical["freq_focus"])
         anomaly_focus = 0.5 * (
             HierarchicalEvidenceIntegration._focus(w_t_local_anomaly)
@@ -2955,6 +2971,11 @@ class Model(nn.Module):
         h = torch.nan_to_num(h)
         h_global = h_core_semantic
         h_anchor_global = torch.nan_to_num(h_anchor_semantic)
+        h_global_residual = torch.nan_to_num(h_global_residual_semantic)
+        global_structured_disagreement = global_residual_gap.abs().mean(dim=-1, keepdim=True)
+        global_structured_disagreement = global_structured_disagreement / (
+            1.0 + global_structured_disagreement
+        )
         h_global_deep = h_transparent
         h_global_deep_gate = 0.5 * (transparent_time_gate + transparent_freq_gate)
         extras: Dict[str, Any] = {
@@ -3032,11 +3053,14 @@ class Model(nn.Module):
             "h_relative_semantic_cross_gate": h_relative_semantic_gate,
             "h_anchor_global": h_anchor_global,
             "h_anchor_global_alt": h_anchor_semantic_alt,
+            "h_global_residual": h_global_residual,
             "h_anchor_semantic_cross_gate": h_anchor_semantic_gate,
+            "h_global_residual_semantic_cross_gate": h_global_residual_semantic_gate,
             "h_global_pair_raw": h_global_pair_raw,
             "h_global": h_global,
             "h_global_deep": h_global_deep,
             "h_global_deep_gate": h_global_deep_gate,
+            "global_structured_disagreement": global_structured_disagreement,
             "anomaly_source": anomaly_source,
             "anomaly_residual": anomaly_residual,
             "anomaly_focus": anomaly_focus,
@@ -3141,12 +3165,7 @@ class Model(nn.Module):
             "agreement_tf_balance",
             "agreement_anchor_prior",
             "agreement_anchor_uncertainty_centered",
-            "agreement_local_centered",
-            "agreement_local_slot_verify",
-            "agreement_candidate_centered",
             "agreement_anchor_residual_margin_mix",
-            "agreement_candidate_margin_mix",
-            "agreement_global_local_consensus",
             "agreement_anchor_support",
         }:
             time_agreement = encoded.get("time_agreement")
@@ -3171,38 +3190,15 @@ class Model(nn.Module):
                 )
             else:
                 residual_logit_weight = residual_logit_weight * residual_warmup_scale
-        candidate_competition = str(
-            getattr(self.config, "prototype_residual_logit_mode", "static")
-        ) in {
-            "local_evidence",
-            "agreement_local_centered",
-            "local_competition",
-            "agreement_candidate_centered",
-            "agreement_candidate_margin_mix",
-            "global_local_consensus",
-            "agreement_global_local_consensus",
-        }
-        local_slot_verify = str(
-            getattr(self.config, "prototype_residual_logit_mode", "static")
-        ) in {
-            "agreement_local_slot_verify",
-        }
-        assignment_uses_local = (
-            str(getattr(self.config, "prototype_assignment_input", "concept"))
-            == "local_anomaly"
-        )
-        routing_concept = (
-            encoded.get("h_proto_local")
-            if (candidate_competition or local_slot_verify or assignment_uses_local)
-            else None
-        )
         prototype_concept_input = str(getattr(self.config, "prototype_concept_input", "h"))
-        if prototype_concept_input == "local_anomaly":
-            prototype_concept = encoded.get("h_proto_local", encoded["h"])
-        elif prototype_concept_input == "relative":
+        if prototype_concept_input == "relative":
             prototype_concept = encoded.get("h_relative", encoded["h"])
         elif prototype_concept_input == "core":
             prototype_concept = encoded.get("h_core", encoded["h"])
+        elif prototype_concept_input == "anchor_global":
+            prototype_concept = encoded.get("h_anchor_global", encoded["h"])
+        elif prototype_concept_input == "global_residual":
+            prototype_concept = encoded.get("h_global_residual", encoded["h"])
         else:
             prototype_concept = encoded["h"]
         joint_proto_out = self._run_proto_head(
@@ -3216,12 +3212,13 @@ class Model(nn.Module):
             alternative_anchor_concept=alternative_anchor_concept,
             anchor_mix_mode=anchor_mix_mode,
             residual_logit_weight=residual_logit_weight,
-            routing_concept=routing_concept,
-            candidate_competition=candidate_competition,
         )
         relative_proto_out: Optional[Dict[str, torch.Tensor]] = None
         evidence_path_weights = None
         fused_joint_logits = joint_proto_out["joint_logits"]
+        prototype_decision_output = str(
+            getattr(self.config, "prototype_decision_output", "joint")
+        )
         if prototype_concept_input in {"dual_relative", "dual_relative_learned"}:
             relative_concept = encoded.get("h_relative")
             primary_concept = encoded.get("h")
@@ -3237,8 +3234,6 @@ class Model(nn.Module):
                     alternative_anchor_concept=None,
                     anchor_mix_mode=anchor_mix_mode,
                     residual_logit_weight=residual_logit_weight,
-                    routing_concept=None,
-                    candidate_competition=False,
                 )
                 primary_logits = joint_proto_out["joint_logits"]
                 relative_logits = relative_proto_out["relative_logits"]
@@ -3296,6 +3291,8 @@ class Model(nn.Module):
                     evidence_path_weights[:, 0:1] * primary_logits
                     + evidence_path_weights[:, 1:2] * relative_logits
                 )
+        if prototype_decision_output == "anchor_only":
+            fused_joint_logits = joint_proto_out["joint_anchor_scores"]
         if not self.cooperative_enabled:
             logits = torch.nan_to_num(fused_joint_logits)
             batch_size = int(logits.shape[0])
@@ -3313,6 +3310,7 @@ class Model(nn.Module):
                         if relative_proto_out is not None
                         else None
                     ),
+                    "prototype_decision_output": prototype_decision_output,
                     "evidence_path_weights": evidence_path_weights,
                     "joint_anchor_scores": joint_proto_out["joint_anchor_scores"],
                     "joint_anchor_scores_raw": joint_proto_out["joint_anchor_scores_raw"],
@@ -3337,15 +3335,6 @@ class Model(nn.Module):
                         "joint_residual_anchor_support_gate"
                     ],
                     "joint_proto_routing_scores": joint_proto_out["joint_proto_routing_scores"],
-                    "joint_local_proto_routing_scores": joint_proto_out[
-                        "joint_local_proto_routing_scores"
-                    ],
-                    "joint_local_proto_pool_weights": joint_proto_out[
-                        "joint_local_proto_pool_weights"
-                    ],
-                    "joint_local_slot_reliability": joint_proto_out[
-                        "joint_local_slot_reliability"
-                    ],
                     "joint_prototype_candidate_mask": joint_proto_out[
                         "joint_prototype_candidate_mask"
                     ],
@@ -3381,11 +3370,6 @@ class Model(nn.Module):
                         "joint_residual_anchor_support_gate"
                     ],
                     "proto_routing_scores": joint_proto_out["joint_proto_routing_scores"],
-                    "local_proto_routing_scores": joint_proto_out[
-                        "joint_local_proto_routing_scores"
-                    ],
-                    "local_proto_pool_weights": joint_proto_out["joint_local_proto_pool_weights"],
-                    "local_slot_reliability": joint_proto_out["joint_local_slot_reliability"],
                     "prototype_candidate_mask": joint_proto_out["joint_prototype_candidate_mask"],
                     "target_class_ids": joint_proto_out["joint_target_class_ids"],
                     "class_neff": joint_proto_out["joint_class_neff"],
@@ -3441,12 +3425,18 @@ class Model(nn.Module):
             encoded["prototype_evidence_weights"],
             head_logits,
         )
-        logits = torch.nan_to_num(fusion["fused_logits"])
+        if prototype_decision_output == "anchor_only":
+            logits = torch.nan_to_num(joint_proto_out["joint_anchor_scores"])
+            fused_probs = torch.softmax(logits, dim=-1)
+        else:
+            logits = torch.nan_to_num(fusion["fused_logits"])
+            fused_probs = fusion["fused_probs"]
         extras = dict(encoded)
         extras.update(
             {
                 "logits": logits,
-                "fused_probs": fusion["fused_probs"],
+                "fused_probs": fused_probs,
+                "prototype_decision_output": prototype_decision_output,
                 "time_logits": time_proto_out["time_logits"],
                 "freq_logits": freq_proto_out["freq_logits"],
                 "joint_logits": joint_proto_out["joint_logits"],

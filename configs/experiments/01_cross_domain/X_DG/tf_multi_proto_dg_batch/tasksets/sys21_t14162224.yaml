@@ -14,6 +14,7 @@ taskset:
         trainer.num_epochs: 100
         trainer.patience: 50
         model.proto_contrastive_weight: 0.08
+        model.proto_contrastive_temperature: 0.3
         model.num_prototypes_per_class: 4
     - task_id: "sys21_t16"
       description: "Target domain 16 with source domains 14, 22, and 24 under the sys21 family defaults."
@@ -27,6 +28,7 @@ taskset:
         trainer.num_epochs: 100
         trainer.patience: 50
         model.proto_contrastive_weight: 0.08
+        model.proto_contrastive_temperature: 0.3
         model.num_prototypes_per_class: 4
     - task_id: "sys21_t22"
       description: "Target domain 22 with source domains 14, 16, and 24 under the sys21 family defaults."
@@ -40,6 +42,7 @@ taskset:
         trainer.num_epochs: 100
         trainer.patience: 50
         model.proto_contrastive_weight: 0.08
+        model.proto_contrastive_temperature: 0.3
         model.num_prototypes_per_class: 4
     - task_id: "sys21_t24"
       description: "Target domain 24 with source domains 14, 16, and 22 under the sys21 family defaults."
@@ -53,4 +56,5 @@ taskset:
         trainer.num_epochs: 100
         trainer.patience: 50
         model.proto_contrastive_weight: 0.08
+        model.proto_contrastive_temperature: 0.3
         model.num_prototypes_per_class: 4
